@@ -1,80 +1,137 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const mysql = require('mysql2/promise');
 
-// Sunucu Ayarları
 const PORT = process.env.PORT || 3000;
 const server = express().listen(PORT, () => console.log(`Listening on ${PORT}`));
-
-// WebSocket Sunucusunu Başlat
 const wss = new WebSocketServer({ server });
 
-// Gemini API Hazırlığı
-// API Key yoksa hata vermesin diye kontrol ekledik
-const API_KEY = process.env.GEMINI_API_KEY;
-if (!API_KEY) {
-    console.error("HATA: GEMINI_API_KEY bulunamadı! Heroku Config Vars ayarlarını kontrol et.");
-}
-const genAI = new GoogleGenerativeAI(API_KEY);
+// Gemini API
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Görsel ve Metin için en hızlı model
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// MODEL SEÇİMİ: En stabil ve hızlı model "gemini-1.5-flash" tır.
-// "gemini-3" şu an public API'de olmadığı için 404 hatası veriyor.
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
-wss.on('connection', (ws) => {
-    console.log('Yeni bir istemci bağlandı.');
-    
-    // --- NABIZ SİSTEMİ (Heartbeat) ---
-    // Heroku bağlantıyı kesmesin diye her 30 saniyede bir "ping" atarız.
-    ws.isAlive = true;
-    ws.on('pong', () => { ws.isAlive = true; });
-    
-    ws.on('message', async (message) => {
-        try {
-            // Gelen mesajı oku
-            const rawMessage = message.toString();
-            
-            // Eğer boş mesajsa işlem yapma
-            if (!rawMessage) return;
-
-            const data = JSON.parse(rawMessage);
-            const userPrompt = data.prompt;
-
-            console.log("Kullanıcıdan gelen:", userPrompt);
-
-            // Yapay Zekaya Gönder
-            const result = await model.generateContent(userPrompt);
-            const response = await result.response;
-            const text = response.text();
-
-            console.log("AI Cevabı:", text.substring(0, 50) + "..."); // Log kirliliği olmasın diye kısalttık
-
-            // Cevabı İstemciye Gönder
-            ws.send(JSON.stringify({ status: 'success', reply: text }));
-
-        } catch (error) {
-            console.error("AI Hatası:", error.message);
-            // Hata detayını istemciye de gönderelim ki ekranda görelim
-            ws.send(JSON.stringify({ 
-                status: 'error', 
-                reply: "AI Hatası: " + error.message 
-            }));
-        }
-    });
-
-    ws.on('close', () => console.log('İstemci ayrıldı.'));
+// Veritabanı Bağlantı Havuzu
+const pool = mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS,
+    database: process.env.DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
 });
 
-// --- BAĞLANTIYI CANLI TUTMA (Keep-Alive) ---
-// Her 30 saniyede bir kontrol et, cevap vermeyenleri kapat, canlılara ping at.
-const interval = setInterval(function ping() {
-  wss.clients.forEach(function each(ws) {
+// --- YARDIMCI FONKSİYONLAR ---
+
+// 1. Veri Madenciliği: Son raporları çeker
+async function getFactoryData() {
+    try {
+        // reports tablosundan son 5 raporu çekiyoruz
+        const [rows] = await pool.query("SELECT * FROM reports ORDER BY report_date DESC LIMIT 5");
+        return JSON.stringify(rows);
+    } catch (error) {
+        return "Veritabanı hatası: " + error.message;
+    }
+}
+
+// 2. Başlık Oluşturma: İlk mesajsa sohbet başlığını belirler
+async function updateChatTitle(sessionId, userMessage) {
+    try {
+        const titleResult = await model.generateContent(`Bu mesaja 3-4 kelimelik çok kısa bir başlık bul (tırnak işareti kullanma): "${userMessage}"`);
+        const title = titleResult.response.text().trim();
+        await pool.query("UPDATE chat_sessions SET title = ? WHERE id = ?", [title, sessionId]);
+    } catch (e) { console.log("Başlık hatası:", e); }
+}
+
+wss.on('connection', (ws) => {
+    console.log('İstemci bağlandı');
+    
+    // Heartbeat (Bağlantı kopmaması için)
+    ws.isAlive = true;
+    ws.on('pong', () => ws.isAlive = true);
+
+    ws.on('message', async (message) => {
+        try {
+            const data = JSON.parse(message);
+            /* Gelen Veri Yapısı:
+               { 
+                 prompt: "Mesaj", 
+                 mode: "text" | "data" | "vision", 
+                 imageBase64: "...", 
+                 sessionId: 123 
+               }
+            */
+            const { prompt, mode, imageBase64, sessionId } = data;
+            let aiReply = "";
+
+            // --- DURUM 1: METİN SOHBETİ ---
+            if (mode === 'text') {
+                // Mesajı Kaydet
+                if(sessionId) {
+                     await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'user', ?)", [sessionId, prompt]);
+                     // İlk mesajsa başlık güncelle
+                     const [count] = await pool.query("SELECT COUNT(*) as c FROM chat_messages WHERE session_id = ?", [sessionId]);
+                     if(count[0].c <= 1) updateChatTitle(sessionId, prompt);
+                }
+
+                // AI Cevaplasın
+                const result = await model.generateContent(prompt);
+                aiReply = result.response.text();
+            } 
+            
+            // --- DURUM 2: VERİ MADENCİLİĞİ (SQL Okuma) ---
+            else if (mode === 'data') {
+                const factoryData = await getFactoryData();
+                const systemInstruction = `Sen bu fabrikanın veritabanına erişimi olan uzman bir asistansın. İşte son raporlar (JSON formatında): ${factoryData}. \nKullanıcının sorusu: "${prompt}". \nBu verilere dayanarak kısa ve net bir analiz yap.`;
+                
+                const result = await model.generateContent(systemInstruction);
+                aiReply = result.response.text();
+            }
+
+            // --- DURUM 3: GÖRSEL ANALİZ (Vision) ---
+            else if (mode === 'vision' && imageBase64) {
+                // Base64 temizliği (data:image... kısmını at)
+                const cleanBase64 = imageBase64.split(',')[1];
+                
+                const imagePart = {
+                    inlineData: {
+                        data: cleanBase64,
+                        mimeType: "image/jpeg"
+                    }
+                };
+
+                // Resmi ve soruyu birlikte gönder
+                const result = await model.generateContent([prompt, imagePart]);
+                aiReply = result.response.text();
+                
+                // Görsel sorgusunu DB'ye kaydet
+                if(sessionId) {
+                    await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'user', ?)", [sessionId, "[GÖRSEL ANALİZ]: " + prompt]);
+                }
+            }
+
+            // AI Cevabını DB'ye kaydet
+            if(sessionId && aiReply) {
+                await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", [sessionId, aiReply]);
+            }
+
+            // Cevabı Gönder
+            ws.send(JSON.stringify({ status: 'success', reply: aiReply }));
+
+        } catch (error) {
+            console.error("Hata:", error);
+            ws.send(JSON.stringify({ status: 'error', reply: "Sistem Hatası: " + error.message }));
+        }
+    });
+});
+
+// Keep-Alive Döngüsü
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
     if (ws.isAlive === false) return ws.terminate();
     ws.isAlive = false;
     ws.ping();
   });
 }, 30000);
-
-wss.on('close', function close() {
-  clearInterval(interval);
-});
