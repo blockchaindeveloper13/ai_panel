@@ -19,7 +19,7 @@ const genAI = new GoogleGenerativeAI(API_KEY);
 
 // MODEL SEÇİMİ: En stabil ve hızlı model "gemini-1.5-flash" tır.
 // "gemini-3" şu an public API'de olmadığı için 404 hatası veriyor.
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 wss.on('connection', (ws) => {
     console.log('Yeni bir istemci bağlandı.');
