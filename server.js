@@ -28,7 +28,7 @@ wss.on('connection', (ws) => {
 
             if (mode === 'text') {
                 // Sadece Metin Modu
-                model = genAI.getGenerativeModel({ model: "gemini-pro" });
+                model = genAI.getGenerativeModel({ model: "gemini-3-pro-preview" });
                 result = await model.generateContent(userPrompt);
             } else if (mode === 'vision') {
                 // Görsel Modu (İleride burayı detaylandıracağız, şimdilik metin cevabı verelim)
