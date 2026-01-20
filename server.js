@@ -7,12 +7,11 @@ const PORT = process.env.PORT || 3000;
 const server = express().listen(PORT, () => console.log(`Listening on ${PORT}`));
 const wss = new WebSocketServer({ server });
 
-// Gemini API
+// Gemini API (En yüksek kapasiteli model)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-// Görsel ve Metin için en hızlı model
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// Veritabanı Bağlantı Havuzu
+// Veritabanı Bağlantısı
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -23,23 +22,52 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// --- YARDIMCI FONKSİYONLAR ---
-
-// 1. Veri Madenciliği: Son raporları çeker
-async function getFactoryData() {
+// --- SINIRSIZ VERİ ÇEKME FONKSİYONU ---
+async function getAllFactoryData() {
     try {
-        // reports tablosundan son 5 raporu çekiyoruz
-        const [rows] = await pool.query("SELECT * FROM reports ORDER BY report_date DESC LIMIT 5");
-        return JSON.stringify(rows);
+        let contextData = "";
+
+        // 1. TÜM KALİTE RAPORLARI (LIMIT YOK)
+        // Sadece çok eski ve gereksiz sütunları almayalım ki analiz şaşmasın ama tüm satırları alıyoruz.
+        const [reports] = await pool.query("SELECT report_date, customer, product, box_type, net_kg, decision, manual_minor, manual_major, note FROM reports ORDER BY report_date DESC");
+        contextData += "TÜM KALİTE RAPORLARI GEÇMİŞİ:\n" + JSON.stringify(reports) + "\n\n";
+
+        // 2. TÜM ÜRETİM VERİLERİ (LIMIT YOK)
+        try {
+            const [uretim] = await pool.query("SELECT * FROM uretim_ana ORDER BY tarih DESC");
+            if(uretim.length > 0) {
+                contextData += "TÜM ÜRETİM GİRİŞLERİ:\n" + JSON.stringify(uretim) + "\n\n";
+            }
+        } catch(e) {}
+
+        // 3. TÜM SEVKİYATLAR (LIMIT YOK)
+        try {
+            const [sevk] = await pool.query("SELECT * FROM sevk_ana ORDER BY sevk_tarihi DESC");
+            if(sevk.length > 0) {
+                contextData += "TÜM SEVKİYAT LİSTESİ:\n" + JSON.stringify(sevk) + "\n\n";
+            }
+        } catch(e) {}
+
+        // 4. GÜNLÜK RAPORLAR (LIMIT YOK)
+        try {
+             // Eğer gunluk_rapor tablosu varsa onu da çek
+             const [gunluk] = await pool.query("SELECT * FROM daily_reports ORDER BY report_date DESC");
+             if(gunluk.length > 0) {
+                 contextData += "TÜM GÜNLÜK RAPORLAR:\n" + JSON.stringify(gunluk) + "\n\n";
+             }
+        } catch(e) {}
+
+        return contextData;
     } catch (error) {
-        return "Veritabanı hatası: " + error.message;
+        return "Veri çekme hatası: " + error.message;
     }
 }
 
-// 2. Başlık Oluşturma: İlk mesajsa sohbet başlığını belirler
+// Başlık Oluşturma
 async function updateChatTitle(sessionId, userMessage) {
     try {
-        const titleResult = await model.generateContent(`Bu mesaja 3-4 kelimelik çok kısa bir başlık bul (tırnak işareti kullanma): "${userMessage}"`);
+        if(!userMessage || userMessage.startsWith("data:")) return;
+        const titleResult = await model.generateContent(`Bu mesaja 3 kelimelik başlık bul: "${userMessage}"`);
         const title = titleResult.response.text().trim();
         await pool.query("UPDATE chat_sessions SET title = ? WHERE id = ?", [title, sessionId]);
     } catch (e) { console.log("Başlık hatası:", e); }
@@ -47,87 +75,75 @@ async function updateChatTitle(sessionId, userMessage) {
 
 wss.on('connection', (ws) => {
     console.log('İstemci bağlandı');
-    
-    // Heartbeat (Bağlantı kopmaması için)
     ws.isAlive = true;
     ws.on('pong', () => ws.isAlive = true);
 
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
-            /* Gelen Veri Yapısı:
-               { 
-                 prompt: "Mesaj", 
-                 mode: "text" | "data" | "vision", 
-                 imageBase64: "...", 
-                 sessionId: 123 
-               }
-            */
             const { prompt, mode, imageBase64, sessionId } = data;
             let aiReply = "";
 
-            // --- DURUM 1: METİN SOHBETİ ---
-            if (mode === 'text') {
-                // Mesajı Kaydet
-                if(sessionId) {
-                     await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'user', ?)", [sessionId, prompt]);
-                     // İlk mesajsa başlık güncelle
-                     const [count] = await pool.query("SELECT COUNT(*) as c FROM chat_messages WHERE session_id = ?", [sessionId]);
-                     if(count[0].c <= 1) updateChatTitle(sessionId, prompt);
-                }
-
-                // AI Cevaplasın
-                const result = await model.generateContent(prompt);
+            // --- GÖRSEL MODU ---
+            if (mode === 'vision' && imageBase64) {
+                const cleanBase64 = imageBase64.split(',')[1];
+                const imagePart = { inlineData: { data: cleanBase64, mimeType: "image/jpeg" } };
+                const result = await model.generateContent([prompt || "Bu resimde ne görüyorsun?", imagePart]);
                 aiReply = result.response.text();
-            } 
+                
+                if(sessionId) await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'user', ?)", [sessionId, "[Resim]: " + prompt]);
+            }
             
-            // --- DURUM 2: VERİ MADENCİLİĞİ (SQL Okuma) ---
+            // --- VERİ MADENCİLİĞİ MODU (FULL ERİŞİM) ---
             else if (mode === 'data') {
-                const factoryData = await getFactoryData();
-                const systemInstruction = `Sen bu fabrikanın veritabanına erişimi olan uzman bir asistansın. İşte son raporlar (JSON formatında): ${factoryData}. \nKullanıcının sorusu: "${prompt}". \nBu verilere dayanarak kısa ve net bir analiz yap.`;
+                // Tüm veriyi çek
+                const factoryData = await getAllFactoryData();
+                
+                // Yapay Zekaya Talimat
+                const systemInstruction = `
+                    Sen V-QMS Fabrika Yönetim Sisteminin yapay zeka beynisin.
+                    Aşağıda fabrikanın TÜM veritabanı kayıtları (Raporlar, Üretim, Sevkiyat) bulunmaktadır.
+                    
+                    VERİ SETİ:
+                    ${factoryData}
+                    
+                    GÖREVİN:
+                    Kullanıcının sorusunu bu BÜTÜN veriyi analiz ederek cevapla.
+                    Trendleri, toplamları, hataları gör.
+                    Kullanıcı Sorusu: "${prompt}"
+                `;
                 
                 const result = await model.generateContent(systemInstruction);
                 aiReply = result.response.text();
+                
+                if(sessionId) await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'user', ?)", [sessionId, prompt]);
             }
 
-            // --- DURUM 3: GÖRSEL ANALİZ (Vision) ---
-            else if (mode === 'vision' && imageBase64) {
-                // Base64 temizliği (data:image... kısmını at)
-                const cleanBase64 = imageBase64.split(',')[1];
-                
-                const imagePart = {
-                    inlineData: {
-                        data: cleanBase64,
-                        mimeType: "image/jpeg"
-                    }
-                };
-
-                // Resmi ve soruyu birlikte gönder
-                const result = await model.generateContent([prompt, imagePart]);
-                aiReply = result.response.text();
-                
-                // Görsel sorgusunu DB'ye kaydet
+            // --- NORMAL SOHBET ---
+            else {
                 if(sessionId) {
-                    await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'user', ?)", [sessionId, "[GÖRSEL ANALİZ]: " + prompt]);
+                     await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'user', ?)", [sessionId, prompt]);
+                     const [c] = await pool.query("SELECT COUNT(*) as c FROM chat_messages WHERE session_id = ?", [sessionId]);
+                     if(c[0].c <= 1) updateChatTitle(sessionId, prompt);
                 }
+                const result = await model.generateContent(prompt);
+                aiReply = result.response.text();
             }
 
-            // AI Cevabını DB'ye kaydet
+            // AI Cevabını Kaydet
             if(sessionId && aiReply) {
                 await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", [sessionId, aiReply]);
             }
 
-            // Cevabı Gönder
             ws.send(JSON.stringify({ status: 'success', reply: aiReply }));
 
         } catch (error) {
             console.error("Hata:", error);
-            ws.send(JSON.stringify({ status: 'error', reply: "Sistem Hatası: " + error.message }));
+            ws.send(JSON.stringify({ status: 'error', reply: "Hata: " + error.message }));
         }
     });
 });
 
-// Keep-Alive Döngüsü
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) return ws.terminate();
