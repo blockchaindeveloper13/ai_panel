@@ -62,7 +62,7 @@ wss.on('connection', (ws) => {
             }
 
             const [userRows] = await pool.query("SELECT role FROM users WHERE id = ?", [userId]);
-            if (userRows.length === 0 || userRows[0].role !== 'ADMIN') {
+            if (userRows.length === 0 || userRows[0].role.toUpperCase() !== 'ADMIN'){
                 return ws.send(JSON.stringify({ 
                     status: 'error', 
                     reply: "Yetki Reddedildi: V-CORE özelliklerine sadece Yöneticiler (ADMİN) erişebilir." 
