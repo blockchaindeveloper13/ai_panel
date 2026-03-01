@@ -88,12 +88,11 @@ wss.on('connection', (ws) => {
             }
 
                         // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
+                        // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
             if (mode === 'performance') {
-                const gunSayisi = data.days || 3; // Android'den 3, 7 veya 30 gelecek
+                const gunSayisi = parseInt(data.days) || 3; 
 
-                // Senin "Yevmiyeci" mantığına birebir uyan SQL Sorgusu:
-                // 1. Önce her personelin (ve yevmiyecilerin) GÜNLÜK ortalama hızını bulur.
-                // 2. Sonra bu günlük ortalamaların, seçilen gün sayısına göre GENEL ortalamasını alır.
+                // Soru işareti (?) yerine doğrudan ${gunSayisi} yazarak hatayı kökten çözdük
                 const sqlQuery = `
                     SELECT personel_adi, 
                            ROUND(AVG(gunluk_hiz)) as genel_hiz, 
@@ -101,22 +100,24 @@ wss.on('connection', (ws) => {
                     FROM (
                         SELECT personel_adi, tarih, AVG(hiz_kg_saat) as gunluk_hiz
                         FROM uretim_verimlilik
-                        WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+                        WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL ${gunSayisi} DAY)
                         GROUP BY personel_adi, tarih
                     ) as gunluk_tablo
                     GROUP BY personel_adi
                     ORDER BY genel_hiz DESC
                 `;
 
-                const [rows] = await pool.query(sqlQuery, [gunSayisi]);
+                // Artık parametre göndermemize gerek yok, sayı direkt SQL'in içinde.
+                const [rows] = await pool.query(sqlQuery);
                 
-                // Android'in listeye dökebilmesi için JSON formatında gönderiyoruz
                 return ws.send(JSON.stringify({ 
                     status: 'success', 
                     type: 'performance_data',
                     data: rows 
                 }));
             }
+            
+            
             
 
             // 🤖 3. BÖLÜM: V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
