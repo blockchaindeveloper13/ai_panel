@@ -86,8 +86,7 @@ wss.on('connection', (ws) => {
                 // DİKKAT: Çeviri modunda veritabanına kayıt (History) YAPMIYORUZ. Direkt cevabı dönüp bitiriyoruz.
                 return ws.send(JSON.stringify({ status: 'success', reply: aiReply }));
             }
-
-                        // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
+            
                         // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
             if (mode === 'performance') {
                 console.log("=====================================");
@@ -95,16 +94,26 @@ wss.on('connection', (ws) => {
                 console.log("Gelen Veri (data):", data);
 
                 const gunSayisi = parseInt(data.days) || 3;
-                console.log("Hesaplanacak Gün Sayısı:", gunSayisi);
+                console.log("Hesaplanacak Aktif Gün Sayısı:", gunSayisi);
 
+                // YENİ MANTIK: Takvimden değil, "en son rapor girilen X günden" verileri çeker
+                // FİLTRE: Deneme isimlerini listeye alma ve gereksiz rapor sayısını gizle
                 const sqlQuery = `
                     SELECT personel_adi, 
-                           ROUND(AVG(gunluk_hiz)) as genel_hiz, 
-                           COUNT(tarih) as rapor_gun_sayisi
+                           ROUND(AVG(gunluk_hiz)) as genel_hiz 
                     FROM (
                         SELECT personel_adi, tarih, AVG(hiz_kg_saat) as gunluk_hiz
                         FROM uretim_verimlilik
-                        WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL ${gunSayisi} DAY)
+                        WHERE tarih IN (
+                            SELECT tarih FROM (
+                                SELECT DISTINCT tarih 
+                                FROM uretim_verimlilik 
+                                ORDER BY tarih DESC 
+                                LIMIT ${gunSayisi}
+                            ) as son_tarihler
+                        )
+                        /* İŞTE FİLTRE BURADA: Deneme kayıtlarını listeye alma */
+                        AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert')
                         GROUP BY personel_adi, tarih
                     ) as gunluk_tablo
                     GROUP BY personel_adi
@@ -121,7 +130,7 @@ wss.on('connection', (ws) => {
                     if (rows.length > 0) {
                         console.log("Örnek Veri (İlk Satır):", rows[0]);
                     } else {
-                        console.log("Uyarı: Veritabanından boş tablo döndü (Kayıt yok).");
+                        console.log("Uyarı: Veritabanından boş tablo döndü (Kayıt yok veya filtrelendi).");
                     }
 
                     const responsePacket = JSON.stringify({ 
@@ -134,19 +143,17 @@ wss.on('connection', (ws) => {
                     return ws.send(responsePacket);
 
                 } catch (sqlError) {
-                    // İŞTE ZURNANIN ZIRT DEDİĞİ YER: HATA YAKALAYICI
+                    // HATA YAKALAYICI
                     console.error("❌ SQL SORGUSU SIRASINDA KRİTİK HATA OLUŞTU:");
                     console.error("Hata Detayı (Message):", sqlError.message);
                     console.error("SQL Kodu (Code):", sqlError.code);
                     
-                    // Android sonsuz yüklemede kalmasın diye hatayı telefona da fırlatıyoruz
                     return ws.send(JSON.stringify({ 
                         status: 'error', 
                         reply: "Sunucu SQL Hatası: " + sqlError.message 
                     }));
                 }
             }
-            
             
             
             
