@@ -87,6 +87,38 @@ wss.on('connection', (ws) => {
                 return ws.send(JSON.stringify({ status: 'success', reply: aiReply }));
             }
 
+                        // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
+            if (mode === 'performance') {
+                const gunSayisi = data.days || 3; // Android'den 3, 7 veya 30 gelecek
+
+                // Senin "Yevmiyeci" mantığına birebir uyan SQL Sorgusu:
+                // 1. Önce her personelin (ve yevmiyecilerin) GÜNLÜK ortalama hızını bulur.
+                // 2. Sonra bu günlük ortalamaların, seçilen gün sayısına göre GENEL ortalamasını alır.
+                const sqlQuery = `
+                    SELECT personel_adi, 
+                           ROUND(AVG(gunluk_hiz)) as genel_hiz, 
+                           COUNT(tarih) as rapor_gun_sayisi
+                    FROM (
+                        SELECT personel_adi, tarih, AVG(hiz_kg_saat) as gunluk_hiz
+                        FROM uretim_verimlilik
+                        WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+                        GROUP BY personel_adi, tarih
+                    ) as gunluk_tablo
+                    GROUP BY personel_adi
+                    ORDER BY genel_hiz DESC
+                `;
+
+                const [rows] = await pool.query(sqlQuery, [gunSayisi]);
+                
+                // Android'in listeye dökebilmesi için JSON formatında gönderiyoruz
+                return ws.send(JSON.stringify({ 
+                    status: 'success', 
+                    type: 'performance_data',
+                    data: rows 
+                }));
+            }
+            
+
             // 🤖 3. BÖLÜM: V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
             
             // Sadece asistan modlarında kullanıcının mesajını kaydet
