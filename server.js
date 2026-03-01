@@ -90,9 +90,13 @@ wss.on('connection', (ws) => {
                         // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
                         // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
             if (mode === 'performance') {
-                const gunSayisi = parseInt(data.days) || 3; 
+                console.log("=====================================");
+                console.log("🟢 PERFORMANS MODU TETİKLENDİ");
+                console.log("Gelen Veri (data):", data);
 
-                // Soru işareti (?) yerine doğrudan ${gunSayisi} yazarak hatayı kökten çözdük
+                const gunSayisi = parseInt(data.days) || 3;
+                console.log("Hesaplanacak Gün Sayısı:", gunSayisi);
+
                 const sqlQuery = `
                     SELECT personel_adi, 
                            ROUND(AVG(gunluk_hiz)) as genel_hiz, 
@@ -107,15 +111,42 @@ wss.on('connection', (ws) => {
                     ORDER BY genel_hiz DESC
                 `;
 
-                // Artık parametre göndermemize gerek yok, sayı direkt SQL'in içinde.
-                const [rows] = await pool.query(sqlQuery);
-                
-                return ws.send(JSON.stringify({ 
-                    status: 'success', 
-                    type: 'performance_data',
-                    data: rows 
-                }));
+                console.log("Çalıştırılacak SQL Sorgusu Hazırlandı.");
+
+                try {
+                    console.log("⏳ Veritabanına sorgu atılıyor...");
+                    const [rows] = await pool.query(sqlQuery);
+                    
+                    console.log("✅ SQL Sorgusu Başarılı! Dönen Satır Sayısı:", rows.length);
+                    if (rows.length > 0) {
+                        console.log("Örnek Veri (İlk Satır):", rows[0]);
+                    } else {
+                        console.log("Uyarı: Veritabanından boş tablo döndü (Kayıt yok).");
+                    }
+
+                    const responsePacket = JSON.stringify({ 
+                        status: 'success', 
+                        type: 'performance_data',
+                        data: rows 
+                    });
+                    
+                    console.log("🚀 Android'e veri paketi gönderiliyor...");
+                    return ws.send(responsePacket);
+
+                } catch (sqlError) {
+                    // İŞTE ZURNANIN ZIRT DEDİĞİ YER: HATA YAKALAYICI
+                    console.error("❌ SQL SORGUSU SIRASINDA KRİTİK HATA OLUŞTU:");
+                    console.error("Hata Detayı (Message):", sqlError.message);
+                    console.error("SQL Kodu (Code):", sqlError.code);
+                    
+                    // Android sonsuz yüklemede kalmasın diye hatayı telefona da fırlatıyoruz
+                    return ws.send(JSON.stringify({ 
+                        status: 'error', 
+                        reply: "Sunucu SQL Hatası: " + sqlError.message 
+                    }));
+                }
             }
+            
             
             
             
