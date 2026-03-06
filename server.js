@@ -161,18 +161,46 @@ wss.on('connection', (ws) => {
             // 🤖 3. BÖLÜM: V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
             
             // Sadece asistan modlarında kullanıcının mesajını kaydet
-            if(sessionId) {
-                const imgDataToSave = imageBase64 ? imageBase64 : null;
-                const msgText = imageBase64 ? "[Görsel]: " + prompt : prompt;
-                await pool.query(
-                    "INSERT INTO chat_messages (session_id, sender, message, image_data) VALUES (?, 'user', ?, ?)", 
-                    [sessionId, msgText, imgDataToSave]
+                        // 🤖 3. BÖLÜM: V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
+            
+            // MOBİL İÇİN OTOMATİK SESSION (SOHBET NO) MANTIĞI:
+            let activeSessionId = sessionId;
+            
+            // Eğer Android geçerli bir sessionId göndermediyse (veya kendi User ID'sini yolladıysa),
+            // Veritabanına bak, bu kullanıcının mevcut bir sohbeti var mı? Yoksa oluştur.
+            if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
+                // 1. Önce bu kullanıcının "chat_sessions" tablosunda bir sohbeti var mı bak
+                const [existingSessions] = await pool.query(
+                    "SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", 
+                    [userId]
                 );
+                
+                if (existingSessions.length > 0) {
+                    activeSessionId = existingSessions[0].id; // Var olanı kullan
+                } else {
+                    // 2. Yoksa yepyeni bir sohbet dosyası oluştur
+                    const [newSession] = await pool.query(
+                        "INSERT INTO chat_sessions (user_id) VALUES (?)", 
+                        [userId]
+                    );
+                    activeSessionId = newSession.insertId; // Yeni oluşturulanın ID'sini al
+                }
             }
 
+            // Artık güvenli ve geçerli bir activeSessionId'miz var!
+            // Kullanıcının mesajını ve varsa resmini kaydet
+            const imgDataToSave = imageBase64 ? imageBase64 : null;
+            const msgText = imageBase64 ? "[Görsel eklendi] " + prompt : prompt;
+            
+            await pool.query(
+                "INSERT INTO chat_messages (session_id, sender, message, image_data) VALUES (?, 'user', ?, ?)", 
+                [activeSessionId, msgText, imgDataToSave]
+            );
+
+            // Geçmişi Getir (Hafıza)
             let history = [];
-            if(sessionId && mode === 'chat') {
-                history = await getChatHistory(sessionId);
+            if(mode === 'chat') {
+                history = await getChatHistory(activeSessionId);
             }
 
             // Senaryo A: Görsel Analiz
@@ -201,11 +229,19 @@ wss.on('connection', (ws) => {
             }
 
             // Sadece asistan modlarında V-CORE'un cevabını kaydet
-            if(sessionId && aiReply) {
-                await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", [sessionId, aiReply]);
+            if(aiReply) {
+                await pool.query(
+                    "INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", 
+                    [activeSessionId, aiReply]
+                );
             }
 
-            ws.send(JSON.stringify({ status: 'success', reply: aiReply }));
+            // Android'e cevabı yollarken, yeni oluşan session_id'yi de bildir ki telefonda aklında tutsun
+            ws.send(JSON.stringify({ 
+                status: 'success', 
+                reply: aiReply,
+                sessionId: activeSessionId
+            }));
 
         } catch (error) {
             console.error("Hata:", error);
@@ -213,6 +249,7 @@ wss.on('connection', (ws) => {
         }
     });
 });
+
 
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => { if (ws.isAlive === false) return ws.terminate(); ws.isAlive = false; ws.ping(); });
