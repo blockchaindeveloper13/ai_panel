@@ -60,6 +60,24 @@ wss.on('connection', (ws) => {
             if (!userId) {
                 return ws.send(JSON.stringify({ status: 'error', reply: "Bağlantı reddedildi: Kullanıcı kimliği yok." }));
             }
+                        // --- YENİ: GEÇMİŞİ YÜKLEME KOMUTU ---
+            if (mode === 'load_history') {
+                if (sessionId && sessionId !== -1) {
+                    const [rows] = await pool.query("SELECT sender, message FROM chat_messages WHERE session_id = ? ORDER BY id ASC", [sessionId]);
+                    ws.send(JSON.stringify({ status: 'history', data: rows, sessionId: sessionId }));
+                }
+                return;
+            }
+
+            // --- YENİ: SOHBETİ TEMİZLEME KOMUTU ---
+            if (mode === 'clear_chat') {
+                if (sessionId && sessionId !== -1) {
+                    await pool.query("DELETE FROM chat_messages WHERE session_id = ?", [sessionId]);
+                }
+                ws.send(JSON.stringify({ status: 'cleared', reply: "Sohbet geçmişi temizlendi." }));
+                return;
+            }
+            
 
             const [userRows] = await pool.query("SELECT role FROM users WHERE id = ?", [userId]);
             if (userRows.length === 0 || userRows[0].role.toUpperCase() !== 'ADMIN'){
