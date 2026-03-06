@@ -8,8 +8,12 @@ const server = express().listen(PORT, () => console.log(`Listening on ${PORT}`))
 const wss = new WebSocketServer({ server });
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-// Not: 2.5 yerine stabil ve güncel olan 2.5-flash modelini tanımladık
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+// 🚀 ADIM 1: V-CORE KİMLİĞİ VE SAMİMİYETİ BEYNE KAZINDI
+const model = genAI.getGenerativeModel({ 
+    model: "gemini-2.5-flash",
+    systemInstruction: "Senin adın V-CORE. Vedat Tunç tarafından geliştirilen, V-QMS (Vedat Quality Manager System) meyve paketleme tesisinin resmi Yapay Zeka Asistanısın. Görevin tesisteki verimliliği artırmak, raporları analiz etmek ve kullanıcıya en samimi, içten, zeki bir dille yardımcı olmaktır. Gerektiğinde 'Reis' gibi samimi hitaplar kullanabilirsin. Asla genel bir Google dil modeli olduğunu söyleme. Karakterinden asla çıkma ve her zaman bağlamı hatırla."
+});
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
@@ -21,10 +25,10 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// --- GEÇMİŞİ HATIRLAMA FONKSİYONU ---
+// --- ADIM 2: HAFIZA LİMİTİ ARTIRILDI (20 -> 100) ---
 async function getChatHistory(sessionId) {
     try {
-        const [rows] = await pool.query("SELECT sender, message FROM chat_messages WHERE session_id = ? ORDER BY id ASC LIMIT 20", [sessionId]);
+        const [rows] = await pool.query("SELECT sender, message FROM chat_messages WHERE session_id = ? ORDER BY id ASC LIMIT 100", [sessionId]);
         return rows.map(row => ({
             role: row.sender === 'user' ? 'user' : 'model',
             parts: [{ text: row.message }]
@@ -52,45 +56,42 @@ wss.on('connection', (ws) => {
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
-            // Android'den artık userId, sourceLang ve targetLang de göndereceğiz
             const { userId, prompt, mode, imageBase64, sessionId, sourceLang, targetLang } = data;
             let aiReply = "";
 
-            // 🛡️ 1. GÜVENLİK DUVARI: SADECE ADMİN KONTROLÜ
+            // 🛡️ GÜVENLİK DUVARI
             if (!userId) {
                 return ws.send(JSON.stringify({ status: 'error', reply: "Bağlantı reddedildi: Kullanıcı kimliği yok." }));
             }
 
-            // --- YENİ: GEÇMİŞİ YÜKLEME KOMUTU (AKILLI HAFIZA) ---
+            // 🚀 ADIM 3: GEÇMİŞİ YÜKLERKEN RESİMLERİ (image_data) DE ÇEKİYORUZ
             if (mode === 'load_history') {
                 let activeSessionId = sessionId;
 
-                // 1. KİLİT NOKTA: Eğer Android numarayı unuttuysa (-1 ise), veritabanından kullanıcının son sohbetini bul!
                 if (!activeSessionId || activeSessionId === -1) {
                     const [existingSessions] = await pool.query(
                         "SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
                         [userId]
                     );
                     if (existingSessions.length > 0) {
-                        activeSessionId = existingSessions[0].id; // Kullanıcının gizli sohbet odasını bulduk!
+                        activeSessionId = existingSessions[0].id; 
                     }
                 }
 
-                // 2. Eğer geçerli bir sohbet odası bulduysak mesajları çek ve Android'e fırlat
                 if (activeSessionId && activeSessionId !== -1) {
+                    // DİKKAT: image_data sütunu sorguya eklendi!
                     const [rows] = await pool.query(
-                        "SELECT sender, message FROM chat_messages WHERE session_id = ? ORDER BY id ASC", 
+                        "SELECT sender, message, image_data FROM chat_messages WHERE session_id = ? ORDER BY id ASC", 
                         [activeSessionId]
                     );
                     ws.send(JSON.stringify({ status: 'history', data: rows, sessionId: activeSessionId }));
                 } else {
-                    // 3. Hiç sohbeti yoksa, boş bir liste gönder ki Android o ilk "Merhaba" karşılama yazısını ekrana çizebilsin!
                     ws.send(JSON.stringify({ status: 'history', data: [], sessionId: -1 }));
                 }
                 return;
             }
 
-            // --- YENİ: SOHBETİ TEMİZLEME KOMUTU ---
+            // --- SOHBETİ TEMİZLEME KOMUTU ---
             if (mode === 'clear_chat') {
                 if (sessionId && sessionId !== -1) {
                     await pool.query("DELETE FROM chat_messages WHERE session_id = ?", [sessionId]);
@@ -99,8 +100,6 @@ wss.on('connection', (ws) => {
                 return;
             }
             
-            
-
             const [userRows] = await pool.query("SELECT role FROM users WHERE id = ?", [userId]);
             if (userRows.length === 0 || userRows[0].role.toUpperCase() !== 'ADMIN'){
                 return ws.send(JSON.stringify({ 
@@ -109,35 +108,20 @@ wss.on('connection', (ws) => {
                 }));
             }
 
-            // 🌐 2. BÖLÜM: ÇEVİRMEN MODU (İzole Edilmiş Alan)
+            // 🌐 ÇEVİRMEN MODU 
             if (mode === 'translate') {
-                // Eğer dil seçilmemişse varsayılanları ata
                 const kaynakDil = sourceLang || "Otomatik Algıla";
                 const hedefDil = targetLang || "İngilizce"; 
-                
-                // Gemini'nin beynini yıkıyoruz: "Sen sadece bir çevirmensin"
                 const systemInstruction = `Sen sadece profesyonel bir yeminli tercümansın. Sana verilen metni '${kaynakDil}' dilinden '${hedefDil}' diline çevir. Asla sohbet etme, açıklama yapma, soru sorma veya ekstra bilgi verme. Sadece çevrilmiş metni ver.`;
-                
                 const translatePrompt = `${systemInstruction}\n\nÇevrilecek Metin:\n${prompt}`;
-                
                 const result = await model.generateContent(translatePrompt);
                 aiReply = result.response.text();
-
-                // DİKKAT: Çeviri modunda veritabanına kayıt (History) YAPMIYORUZ. Direkt cevabı dönüp bitiriyoruz.
                 return ws.send(JSON.stringify({ status: 'success', reply: aiReply }));
             }
             
-                        // 🏆 4. BÖLÜM: PERFORMANS (LİDERLİK TABLOSU) MODU
+            // 🏆 PERFORMANS MODU
             if (mode === 'performance') {
-                console.log("=====================================");
-                console.log("🟢 PERFORMANS MODU TETİKLENDİ");
-                console.log("Gelen Veri (data):", data);
-
                 const gunSayisi = parseInt(data.days) || 3;
-                console.log("Hesaplanacak Aktif Gün Sayısı:", gunSayisi);
-
-                // YENİ MANTIK: Takvimden değil, "en son rapor girilen X günden" verileri çeker
-                // FİLTRE: Deneme isimlerini listeye alma ve gereksiz rapor sayısını gizle
                 const sqlQuery = `
                     SELECT personel_adi, 
                            ROUND(AVG(gunluk_hiz)) as genel_hiz 
@@ -152,7 +136,6 @@ wss.on('connection', (ws) => {
                                 LIMIT ${gunSayisi}
                             ) as son_tarihler
                         )
-                        /* İŞTE FİLTRE BURADA: Deneme kayıtlarını listeye alma */
                         AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert')
                         GROUP BY personel_adi, tarih
                     ) as gunluk_tablo
@@ -160,120 +143,56 @@ wss.on('connection', (ws) => {
                     ORDER BY genel_hiz DESC
                 `;
 
-                console.log("Çalıştırılacak SQL Sorgusu Hazırlandı.");
-
                 try {
-                    console.log("⏳ Veritabanına sorgu atılıyor...");
                     const [rows] = await pool.query(sqlQuery);
-                    
-                    console.log("✅ SQL Sorgusu Başarılı! Dönen Satır Sayısı:", rows.length);
-                    if (rows.length > 0) {
-                        console.log("Örnek Veri (İlk Satır):", rows[0]);
-                    } else {
-                        console.log("Uyarı: Veritabanından boş tablo döndü (Kayıt yok veya filtrelendi).");
-                    }
-
-                    const responsePacket = JSON.stringify({ 
-                        status: 'success', 
-                        type: 'performance_data',
-                        data: rows 
-                    });
-                    
-                    console.log("🚀 Android'e veri paketi gönderiliyor...");
-                    return ws.send(responsePacket);
-
+                    return ws.send(JSON.stringify({ status: 'success', type: 'performance_data', data: rows }));
                 } catch (sqlError) {
-                    // HATA YAKALAYICI
-                    console.error("❌ SQL SORGUSU SIRASINDA KRİTİK HATA OLUŞTU:");
-                    console.error("Hata Detayı (Message):", sqlError.message);
-                    console.error("SQL Kodu (Code):", sqlError.code);
-                    
-                    return ws.send(JSON.stringify({ 
-                        status: 'error', 
-                        reply: "Sunucu SQL Hatası: " + sqlError.message 
-                    }));
+                    return ws.send(JSON.stringify({ status: 'error', reply: "Sunucu SQL Hatası: " + sqlError.message }));
                 }
             }
             
-            
-            
-
-            // 🤖 3. BÖLÜM: V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
-            
-            // Sadece asistan modlarında kullanıcının mesajını kaydet
-                        // 🤖 3. BÖLÜM: V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
-            
-            // MOBİL İÇİN OTOMATİK SESSION (SOHBET NO) MANTIĞI:
+            // 🤖 V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
             let activeSessionId = sessionId;
-            
-            // Eğer Android geçerli bir sessionId göndermediyse (veya kendi User ID'sini yolladıysa),
-            // Veritabanına bak, bu kullanıcının mevcut bir sohbeti var mı? Yoksa oluştur.
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
-                // 1. Önce bu kullanıcının "chat_sessions" tablosunda bir sohbeti var mı bak
-                const [existingSessions] = await pool.query(
-                    "SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", 
-                    [userId]
-                );
-                
+                const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [userId]);
                 if (existingSessions.length > 0) {
-                    activeSessionId = existingSessions[0].id; // Var olanı kullan
+                    activeSessionId = existingSessions[0].id; 
                 } else {
-                    // 2. Yoksa yepyeni bir sohbet dosyası oluştur
-                    const [newSession] = await pool.query(
-                        "INSERT INTO chat_sessions (user_id) VALUES (?)", 
-                        [userId]
-                    );
-                    activeSessionId = newSession.insertId; // Yeni oluşturulanın ID'sini al
+                    const [newSession] = await pool.query("INSERT INTO chat_sessions (user_id) VALUES (?)", [userId]);
+                    activeSessionId = newSession.insertId; 
                 }
             }
 
-            // Artık güvenli ve geçerli bir activeSessionId'miz var!
-            // Kullanıcının mesajını ve varsa resmini kaydet
-            const imgDataToSave = imageBase64 ? imageBase64 : null;
-            const msgText = imageBase64 ? "[Görsel eklendi] " + prompt : prompt;
+            // 🚀 ADIM 4: SADECE RESMİ KAYDET, "[Görsel eklendi]" YAZISINI SİL
+            let imgDataToSave = null;
+            if (data.imagesBase64 && data.imagesBase64.length > 0) {
+                imgDataToSave = data.imagesBase64[0]; 
+            } else if (imageBase64) {
+                imgDataToSave = imageBase64;
+            }
             
+            // Sadece prompt'u kaydediyoruz, ekstra yazı eklemiyoruz
             await pool.query(
                 "INSERT INTO chat_messages (session_id, sender, message, image_data) VALUES (?, 'user', ?, ?)", 
-                [activeSessionId, msgText, imgDataToSave]
+                [activeSessionId, prompt, imgDataToSave]
             );
 
-            // Geçmişi Getir (Hafıza)
             let history = [];
             if(mode === 'chat') {
                 history = await getChatHistory(activeSessionId);
             }
 
-            // Senaryo A: Görsel Analiz
-                        // Senaryo A: Görsel ve DOSYA (PDF, TXT vb.) Analizi
             if (mode === 'vision' && data.imagesBase64 && data.imagesBase64.length > 0) {
-                // Gemini'ye gönderilecek parçaları (Soru + Dosyalar) hazırlıyoruz
                 let geminiParts = [ prompt || "Lütfen ekteki dosyayı/görseli detaylıca analiz et." ];
-
-                // Android'den gelen tüm dosyaları dön ve formatlarını algıla
                 for (const mediaStr of data.imagesBase64) {
-                    // Gelen formatı parçala (Örn: "data:application/pdf;base64,JVBERi...")
                     const matches = mediaStr.match(/^data:(.+);base64,(.+)$/);
-                    
                     if (matches && matches.length === 3) {
-                        const detectedMimeType = matches[1]; // image/jpeg, application/pdf vb.
-                        const cleanBase64 = matches[2];      // Saf dosya şifresi
-                        
-                        // Gemini'nin anlayacağı formata çevirip pakete ekle
-                        geminiParts.push({
-                            inlineData: {
-                                data: cleanBase64,
-                                mimeType: detectedMimeType
-                            }
-                        });
+                        geminiParts.push({ inlineData: { data: matches[2], mimeType: matches[1] } });
                     }
                 }
-
-                // Paketi (Soru + İçindeki PDF/Resimler) Gemini'ye fırlat
                 const result = await model.generateContent(geminiParts);
                 aiReply = result.response.text();
             }
-                
-            // Senaryo B: Veri Madenciliği
             else if (mode === 'data') {
                 const factoryData = await getAllFactoryData();
                 const chat = model.startChat({ history: [] }); 
@@ -281,17 +200,15 @@ wss.on('connection', (ws) => {
                 const result = await chat.sendMessage(msg);
                 aiReply = result.response.text();
             }
-            // Senaryo C: Sohbet (Hafızalı)
             else if (mode === 'chat') {
+                // 🚀 ADIM 5: maxOutputTokens: 1000 SINIRI TAMAMEN SİLİNDİ!
                 const chat = model.startChat({
-                    history: history,
-                    generationConfig: { maxOutputTokens: 1000 }
+                    history: history
                 });
                 const result = await chat.sendMessage(prompt);
                 aiReply = result.response.text();
             }
 
-            // Sadece asistan modlarında V-CORE'un cevabını kaydet
             if(aiReply) {
                 await pool.query(
                     "INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", 
@@ -299,7 +216,6 @@ wss.on('connection', (ws) => {
                 );
             }
 
-            // Android'e cevabı yollarken, yeni oluşan session_id'yi de bildir ki telefonda aklında tutsun
             ws.send(JSON.stringify({ 
                 status: 'success', 
                 reply: aiReply,
@@ -313,7 +229,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => { if (ws.isAlive === false) return ws.terminate(); ws.isAlive = false; ws.ping(); });
 }, 30000);
+
