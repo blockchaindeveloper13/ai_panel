@@ -204,12 +204,35 @@ wss.on('connection', (ws) => {
             }
 
             // Senaryo A: Görsel Analiz
-            if (mode === 'vision' && imageBase64) {
-                const cleanBase64 = imageBase64.split(',')[1];
-                const imagePart = { inlineData: { data: cleanBase64, mimeType: "image/jpeg" } };
-                const result = await model.generateContent([prompt || "Bu resimde ne görüyorsun?", imagePart]);
+                        // Senaryo A: Görsel ve DOSYA (PDF, TXT vb.) Analizi
+            if (mode === 'vision' && data.imagesBase64 && data.imagesBase64.length > 0) {
+                // Gemini'ye gönderilecek parçaları (Soru + Dosyalar) hazırlıyoruz
+                let geminiParts = [ prompt || "Lütfen ekteki dosyayı/görseli detaylıca analiz et." ];
+
+                // Android'den gelen tüm dosyaları dön ve formatlarını algıla
+                for (const mediaStr of data.imagesBase64) {
+                    // Gelen formatı parçala (Örn: "data:application/pdf;base64,JVBERi...")
+                    const matches = mediaStr.match(/^data:(.+);base64,(.+)$/);
+                    
+                    if (matches && matches.length === 3) {
+                        const detectedMimeType = matches[1]; // image/jpeg, application/pdf vb.
+                        const cleanBase64 = matches[2];      // Saf dosya şifresi
+                        
+                        // Gemini'nin anlayacağı formata çevirip pakete ekle
+                        geminiParts.push({
+                            inlineData: {
+                                data: cleanBase64,
+                                mimeType: detectedMimeType
+                            }
+                        });
+                    }
+                }
+
+                // Paketi (Soru + İçindeki PDF/Resimler) Gemini'ye fırlat
+                const result = await model.generateContent(geminiParts);
                 aiReply = result.response.text();
             }
+                
             // Senaryo B: Veri Madenciliği
             else if (mode === 'data') {
                 const factoryData = await getAllFactoryData();
