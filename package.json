@@ -10,7 +10,7 @@
     "express": "^4.18.2",
     "mysql2": "^3.6.0",
     "ws": "^8.14.2",
-    "@google/genai": "^0.1.1" 
+    "@google/genai": "latest"
   },
   "engines": {
     "node": "18.x"
