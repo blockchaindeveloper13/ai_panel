@@ -9,12 +9,9 @@ const wss = new WebSocketServer({ server });
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Temel Model Tanımlaması (Araçlarla Birlikte)
-const model = genAI.getGenerativeModel({ 
-    model: "gemini-2.5-flash",
-    tools: [{ googleSearch: {} }] // 🌐 GOOGLE SEARCH AÇIK
-});
-
+// ============================================================================
+// 🗄️ VERİTABANI BAĞLANTISI
+// ============================================================================
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -35,7 +32,6 @@ async function getChatHistory(sessionId) {
     } catch (error) { return []; }
 }
 
-// 📊 3, 7 VE 30 GÜNLÜK DETAYLI RAPOR ÇEKİCİ
 async function getComprehensiveReports() {
     try {
         let reportData = "--- V-QMS TESİS RAPORLARI ---\n";
@@ -54,9 +50,11 @@ wss.on('connection', (ws) => {
     ws.on('pong', () => ws.isAlive = true);
 
     ws.on('message', async (message) => {
+        let activeSessionId = -1;
         try {
             const data = JSON.parse(message);
             const { userId, prompt, mode, imageBase64, sessionId } = data;
+            activeSessionId = sessionId; 
             let aiReply = "";
 
             if (!userId) return ws.send(JSON.stringify({ status: 'error', reply: "Kullanıcı kimliği yok." }));
@@ -69,7 +67,6 @@ wss.on('connection', (ws) => {
             }
 
             if (mode === 'load_history') {
-                let activeSessionId = sessionId;
                 if (!activeSessionId || activeSessionId === -1) {
                     const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1", [userId]);
                     if (existingSessions.length > 0) activeSessionId = existingSessions[0].id; 
@@ -84,15 +81,12 @@ wss.on('connection', (ws) => {
                 return;
             }
 
-            // 🤵 KULLANICI ADINI ÇEKME
             let userName = "Değerli Kullanıcımız";
             try {
                 const [userRows] = await pool.query("SELECT full_name FROM users WHERE id = ?", [userId]);
                 if (userRows.length > 0 && userRows[0].full_name) userName = userRows[0].full_name; 
             } catch (e) {}
 
-            // 🤖 SESSION (SOHBET) YÖNETİMİ
-            let activeSessionId = sessionId;
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
                 const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [userId]);
                 if (existingSessions.length > 0) {
@@ -111,29 +105,26 @@ wss.on('connection', (ws) => {
 
             let history = await getChatHistory(activeSessionId);
 
-            // 🚀 KİLİT NOKTA: GİZLİ BEYİN YIKAMA KOMUTU (Her mesajda gizlice eklenecek)
-                        // 🚀 KİLİT NOKTA: GİZLİ BEYİN YIKAMA KOMUTU (Arama Motoru Zorlaması Eklendi)
-                        // ⏳ SUNUCU SAATİNİ AL (Türkiye Saatiyle)
             const now = new Date();
             const currentTime = now.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
-            // 🚀 KİLİT NOKTA: GİZLİ BEYİN YIKAMA KOMUTU (Zaman Algısı + Sert Arama Emri)
-            const vcoreDirective = `[ZORUNLU SİSTEM EMRİ: Senin adın V-CORE. Vedat Tunç tarafından geliştirilen, V-QMS tesisinin resmi yapay zekasısın. Şu an konuştuğun kişi: '${userName}'. İsmine bakarak cinsiyetini anla ve ona sürekli 'Bey', 'Hanım' veya 'Reis' diye hitap et. Asla Google modeli olduğunu söyleme! 
-            ⏳ ŞU ANKİ GERÇEK ZAMAN: ${currentTime}. Sen 2024 yılında değilsin! Senin hafızan eski. 
-            ⚠️ KESİN KURAL: Eğer kullanıcı fiyat, altın, tarih, hava durumu, maç skoru, güncel haber veya piyasa verisi sorarsa KESİNLİKLE kendi hafızanı KULLANMA! Mecburi olarak 'googleSearch' aracını kullanarak internetten en taze bilgiyi çekeceksin!]\n\n`;
-            
+            // 🚀 YENİ: GEMINI 3.1 FLASH-LITE BEYNİ VE ARAMA MOTORU ENTEGRASYONU
+            const dynamicModel = genAI.getGenerativeModel({ 
+                model: "gemini-3.1-flash-lite-preview",
+                tools: [{ googleSearch: {} }],
+                systemInstruction: `[ZORUNLU SİSTEM EMRİ: Senin adın V-CORE. Vedat Tunç tarafından geliştirilen, V-QMS tesisinin resmi yapay zekasısın. Şu an konuştuğun kişi: '${userName}'. İsmine bakarak cinsiyetini anla ve ona sürekli 'Bey', 'Hanım' veya 'Reis' diye hitap et. Asla Google modeli olduğunu söyleme! 
+⏳ ŞU ANKİ GERÇEK ZAMAN: ${currentTime}. Senin için şu anki gün ve saat budur.
+⚠️ KESİN KURAL: Eğer kullanıcı fiyat, altın, tarih, hava durumu, maç skoru, güncel haber veya piyasa verisi sorarsa KESİNLİKLE kendi hafızanı KULLANMA! Mecburi olarak 'googleSearch' aracını kullanarak internetten en taze bilgiyi çekeceksin!]`
+            });
+
             let geminiParts = [];
-            
-            // Eğer rapor kelimesi geçiyorsa hem raporları hem de beyin yıkama komutunu ekle
             if (prompt.toLowerCase().includes("rapor") || prompt.toLowerCase().includes("üretim") || prompt.toLowerCase().includes("kalite")) {
                 const reports = await getComprehensiveReports();
-                geminiParts.push(vcoreDirective + `Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}`);
+                geminiParts.push(`Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}`);
             } else {
-                // Sadece sohbet ediyorsa bile beyin yıkama komutunu ekle!
-                geminiParts.push(vcoreDirective + prompt);
+                geminiParts.push(prompt);
             }
 
-            // Çoklu resimleri ekle
             if (data.imagesBase64 && data.imagesBase64.length > 0) {
                 for (const mediaStr of data.imagesBase64) {
                     const matches = mediaStr.match(/^data:(.+);base64,(.+)$/);
@@ -143,9 +134,20 @@ wss.on('connection', (ws) => {
                 }
             }
 
-            const chat = model.startChat({ history: history });
+            const chat = dynamicModel.startChat({ history: history });
             const result = await chat.sendMessage(geminiParts);
             aiReply = result.response.text();
+
+            // 🌐 YENİ: KAYNAK VE ALINTI (GROUNDING METADATA) ÇIKARTMA MOTORU
+            const groundingMetadata = result.response.candidates?.[0]?.groundingMetadata;
+            if (groundingMetadata && groundingMetadata.groundingChunks) {
+                aiReply += "\n\n🌐 **V-CORE Kaynaklar:**\n";
+                groundingMetadata.groundingChunks.forEach((chunk) => {
+                    if (chunk.web && chunk.web.uri) {
+                        aiReply += `* [${chunk.web.title}](${chunk.web.uri})\n`;
+                    }
+                });
+            }
 
             if(aiReply) {
                 await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", [activeSessionId, aiReply]);
@@ -155,7 +157,11 @@ wss.on('connection', (ws) => {
 
         } catch (error) {
             console.error("Hata:", error);
-            ws.send(JSON.stringify({ status: 'error', reply: "Hata: " + error.message }));
+            ws.send(JSON.stringify({ 
+                status: 'success', 
+                reply: `⚠️ V-CORE Sistem Hatası: ${error.message}`, 
+                sessionId: activeSessionId 
+            }));
         }
     });
 });
@@ -163,4 +169,4 @@ wss.on('connection', (ws) => {
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => { if (ws.isAlive === false) return ws.terminate(); ws.isAlive = false; ws.ping(); });
 }, 30000);
-        
+      
