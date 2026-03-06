@@ -87,8 +87,17 @@ wss.on('connection', (ws) => {
             }
 
             // 🤵 KULLANICI ADINI VE CİNSİYETİNİ (Hitap İçin) ÇEKME
-            const [userRows] = await pool.query("SELECT ad, soyad FROM users WHERE id = ?", [userId]);
-            const userName = userRows.length > 0 ? `${userRows[0].ad} ${userRows[0].soyad}` : "Değerli Kullanıcımız";
+                        // 🤵 KULLANICI ADINI VE CİNSİYETİNİ ÇEKME (VERİTABANINA TAM UYUMLU SÜRÜM)
+            let userName = "Değerli Kullanıcımız";
+            try {
+                // Senin veritabanındaki 'full_name' sütununu çekiyoruz
+                const [userRows] = await pool.query("SELECT full_name FROM users WHERE id = ?", [userId]);
+                if (userRows.length > 0 && userRows[0].full_name) {
+                    userName = userRows[0].full_name; // Direkt "Vedat Tunç" olarak alır
+                }
+            } catch (nameError) {
+                console.log("İsim sütunu hatası, sunucu çökmesi engellendi: ", nameError.message);
+            }
             
             // 🧠 DİNAMİK V-CORE BEYNİ (Google Search + İsim + Çoklu Resim Kuralı)
             const dynamicModel = genAI.getGenerativeModel({ 
@@ -97,9 +106,9 @@ wss.on('connection', (ws) => {
 Şu an konuştuğun kullanıcının adı: ${userName}. İsmine bakarak cinsiyetini tahmin et ve ona sürekli 'Bey', 'Hanım' veya çok samimi durumlarda 'Reis' diye hitap et. 
 Eğer kullanıcı sana birden fazla resim atarsa, hepsini birbiriyle kıyaslayarak toplu bir karar ver.
 Gerektiğinde internetten arama yapabilirsin. Gerekli durumlarda açıklamanı desteklemek için internetten bulduğun resimleri ![Resim Adı](Resim_URLsi) markdown formatıyla mesaja ekle.`,
-                tools: [{ googleSearch: {} }] // 🌐 GOOGLE SEARCH ENTEGRASYONU AÇILDI!
+                tools: [{ googleSearch: {} }] // 🌐 GOOGLE SEARCH ENTEGRASYONU
             });
-
+            
             let activeSessionId = sessionId;
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
                 const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [userId]);
