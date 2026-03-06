@@ -60,11 +60,32 @@ wss.on('connection', (ws) => {
             if (!userId) {
                 return ws.send(JSON.stringify({ status: 'error', reply: "Bağlantı reddedildi: Kullanıcı kimliği yok." }));
             }
-                        // --- YENİ: GEÇMİŞİ YÜKLEME KOMUTU ---
+
+            // --- YENİ: GEÇMİŞİ YÜKLEME KOMUTU (AKILLI HAFIZA) ---
             if (mode === 'load_history') {
-                if (sessionId && sessionId !== -1) {
-                    const [rows] = await pool.query("SELECT sender, message FROM chat_messages WHERE session_id = ? ORDER BY id ASC", [sessionId]);
-                    ws.send(JSON.stringify({ status: 'history', data: rows, sessionId: sessionId }));
+                let activeSessionId = sessionId;
+
+                // 1. KİLİT NOKTA: Eğer Android numarayı unuttuysa (-1 ise), veritabanından kullanıcının son sohbetini bul!
+                if (!activeSessionId || activeSessionId === -1) {
+                    const [existingSessions] = await pool.query(
+                        "SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+                        [userId]
+                    );
+                    if (existingSessions.length > 0) {
+                        activeSessionId = existingSessions[0].id; // Kullanıcının gizli sohbet odasını bulduk!
+                    }
+                }
+
+                // 2. Eğer geçerli bir sohbet odası bulduysak mesajları çek ve Android'e fırlat
+                if (activeSessionId && activeSessionId !== -1) {
+                    const [rows] = await pool.query(
+                        "SELECT sender, message FROM chat_messages WHERE session_id = ? ORDER BY id ASC", 
+                        [activeSessionId]
+                    );
+                    ws.send(JSON.stringify({ status: 'history', data: rows, sessionId: activeSessionId }));
+                } else {
+                    // 3. Hiç sohbeti yoksa, boş bir liste gönder ki Android o ilk "Merhaba" karşılama yazısını ekrana çizebilsin!
+                    ws.send(JSON.stringify({ status: 'history', data: [], sessionId: -1 }));
                 }
                 return;
             }
@@ -77,6 +98,7 @@ wss.on('connection', (ws) => {
                 ws.send(JSON.stringify({ status: 'cleared', reply: "Sohbet geçmişi temizlendi." }));
                 return;
             }
+            
             
 
             const [userRows] = await pool.query("SELECT role FROM users WHERE id = ?", [userId]);
