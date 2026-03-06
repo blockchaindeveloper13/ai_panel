@@ -1,17 +1,16 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+// 🚀 YENİ KÜTÜPHANE İÇERİ AKTARILDI
+const { GoogleGenAI } = require("@google/genai"); 
 const mysql = require('mysql2/promise');
 
 const PORT = process.env.PORT || 3000;
 const server = express().listen(PORT, () => console.log(`Listening on ${PORT}`));
 const wss = new WebSocketServer({ server });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// 🚀 YENİ MOTOR BAŞLATILDI
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// ============================================================================
-// 🗄️ VERİTABANI BAĞLANTISI
-// ============================================================================
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -53,7 +52,7 @@ wss.on('connection', (ws) => {
         let activeSessionId = -1;
         try {
             const data = JSON.parse(message);
-            const { userId, prompt, mode, imageBase64, sessionId } = data;
+            const { userId, prompt, mode, imageBase64, sessionId, sourceLang, targetLang } = data;
             activeSessionId = sessionId; 
             let aiReply = "";
 
@@ -87,11 +86,32 @@ wss.on('connection', (ws) => {
                 if (userRows.length > 0 && userRows[0].full_name) userName = userRows[0].full_name; 
             } catch (e) {}
 
+            // ÇEVİRMEN MODU (YENİ SİSTEME UYARLANDI)
+            if (mode === 'translate') {
+                const kaynak = sourceLang || "Otomatik";
+                const hedef = targetLang || "İngilizce"; 
+                const response = await ai.models.generateContent({
+                    model: 'gemini-3.1-flash-lite-preview',
+                    contents: `Çevrilecek Metin:\n${prompt}`,
+                    config: {
+                        systemInstruction: `Sen yeminli tercümansın. '${kaynak}' dilinden '${hedef}' diline çevir. Sadece çeviriyi ver.`
+                    }
+                });
+                return ws.send(JSON.stringify({ status: 'success', reply: response.text }));
+            }
+
+            // PERFORMANS MODU (Değişmedi, veritabanı işlemi)
+            if (mode === 'performance') {
+                const gunSayisi = parseInt(data.days) || 3;
+                const sqlQuery = `SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz FROM (SELECT personel_adi, tarih, AVG(hiz_kg_saat) as gunluk_hiz FROM uretim_verimlilik WHERE tarih IN (SELECT tarih FROM (SELECT DISTINCT tarih FROM uretim_verimlilik ORDER BY tarih DESC LIMIT ${gunSayisi}) as son_tarihler) AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert') GROUP BY personel_adi, tarih) as gunluk_tablo GROUP BY personel_adi ORDER BY genel_hiz DESC`;
+                const [rows] = await pool.query(sqlQuery);
+                return ws.send(JSON.stringify({ status: 'success', type: 'performance_data', data: rows }));
+            }
+
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
                 const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [userId]);
-                if (existingSessions.length > 0) {
-                    activeSessionId = existingSessions[0].id; 
-                } else {
+                if (existingSessions.length > 0) activeSessionId = existingSessions[0].id; 
+                else {
                     const [newSession] = await pool.query("INSERT INTO chat_sessions (user_id) VALUES (?)", [userId]);
                     activeSessionId = newSession.insertId; 
                 }
@@ -104,42 +124,49 @@ wss.on('connection', (ws) => {
             await pool.query("INSERT INTO chat_messages (session_id, sender, message, image_data) VALUES (?, 'user', ?, ?)", [activeSessionId, prompt, imgDataToSave]);
 
             let history = await getChatHistory(activeSessionId);
-
             const now = new Date();
             const currentTime = now.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
-            // 🚀 YENİ: GEMINI 3.1 FLASH-LITE BEYNİ VE ARAMA MOTORU ENTEGRASYONU
-            const dynamicModel = genAI.getGenerativeModel({ 
-                model: "gemini-3.1-flash-lite-preview",
-                tools: [{ googleSearch: {} }],
-                systemInstruction: `[ZORUNLU SİSTEM EMRİ: Senin adın V-CORE. Vedat Tunç tarafından geliştirilen, V-QMS tesisinin resmi yapay zekasısın. Şu an konuştuğun kişi: '${userName}'. İsmine bakarak cinsiyetini anla ve ona sürekli 'Bey', 'Hanım' veya 'Reis' diye hitap et. Asla Google modeli olduğunu söyleme! 
+            const vcoreDirective = `[ZORUNLU SİSTEM EMRİ: Senin adın V-CORE. Vedat Tunç tarafından geliştirilen, V-QMS tesisinin resmi yapay zekasısın. Şu an konuştuğun kişi: '${userName}'. Ona sürekli 'Bey', 'Hanım' veya 'Reis' diye hitap et. Asla Google modeli olduğunu söyleme! 
 ⏳ ŞU ANKİ GERÇEK ZAMAN: ${currentTime}. Senin için şu anki gün ve saat budur.
-⚠️ KESİN KURAL: Eğer kullanıcı fiyat, altın, tarih, hava durumu, maç skoru, güncel haber veya piyasa verisi sorarsa KESİNLİKLE kendi hafızanı KULLANMA! Mecburi olarak 'googleSearch' aracını kullanarak internetten en taze bilgiyi çekeceksin!]`
-            });
+⚠️ KESİN KURAL: Eğer kullanıcı fiyat, altın, tarih, hava durumu, maç skoru, güncel haber veya piyasa verisi sorarsa KESİNLİKLE kendi hafızanı KULLANMA! 'googleSearch' aracını kullanarak internetten bilgi çek!]`;
 
-            let geminiParts = [];
+            // YENİ KÜTÜPHANE İÇİN PAKET HAZIRLIĞI
+            let currentMessageParts = [];
             if (prompt.toLowerCase().includes("rapor") || prompt.toLowerCase().includes("üretim") || prompt.toLowerCase().includes("kalite")) {
                 const reports = await getComprehensiveReports();
-                geminiParts.push(`Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}`);
+                currentMessageParts.push({ text: `Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}` });
             } else {
-                geminiParts.push(prompt);
+                currentMessageParts.push({ text: prompt });
             }
 
             if (data.imagesBase64 && data.imagesBase64.length > 0) {
                 for (const mediaStr of data.imagesBase64) {
                     const matches = mediaStr.match(/^data:(.+);base64,(.+)$/);
                     if (matches && matches.length === 3) {
-                        geminiParts.push({ inlineData: { data: matches[2], mimeType: matches[1] } });
+                        currentMessageParts.push({ inlineData: { data: matches[2], mimeType: matches[1] } });
                     }
                 }
             }
 
-            const chat = dynamicModel.startChat({ history: history });
-            const result = await chat.sendMessage(geminiParts);
-            aiReply = result.response.text();
+            // GEÇMİŞİ VE YENİ MESAJI BİRLEŞTİR
+            let contents = history.map(h => ({ role: h.role, parts: h.parts }));
+            contents.push({ role: 'user', parts: currentMessageParts });
 
-            // 🌐 YENİ: KAYNAK VE ALINTI (GROUNDING METADATA) ÇIKARTMA MOTORU
-            const groundingMetadata = result.response.candidates?.[0]?.groundingMetadata;
+            // 🚀 GEMINI 3.1 FLASH-LITE ATEŞLEMESİ
+            const response = await ai.models.generateContent({
+                model: 'gemini-3.1-flash-lite-preview',
+                contents: contents,
+                config: {
+                    systemInstruction: vcoreDirective,
+                    tools: [{ googleSearch: {} }] // 🌐 GOOGLE SEARCH AÇIK
+                }
+            });
+
+            aiReply = response.text;
+
+            // 🌐 KAYNAKÇA (ALINTI) MOTORU
+            const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
             if (groundingMetadata && groundingMetadata.groundingChunks) {
                 aiReply += "\n\n🌐 **V-CORE Kaynaklar:**\n";
                 groundingMetadata.groundingChunks.forEach((chunk) => {
@@ -159,7 +186,7 @@ wss.on('connection', (ws) => {
             console.error("Hata:", error);
             ws.send(JSON.stringify({ 
                 status: 'success', 
-                reply: `⚠️ V-CORE Sistem Hatası: ${error.message}`, 
+                reply: `⚠️ V-CORE 3.1 Sistem Hatası: ${error.message}`, 
                 sessionId: activeSessionId 
             }));
         }
@@ -169,4 +196,4 @@ wss.on('connection', (ws) => {
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => { if (ws.isAlive === false) return ws.terminate(); ws.isAlive = false; ws.ping(); });
 }, 30000);
-      
+                            
