@@ -9,12 +9,6 @@ const wss = new WebSocketServer({ server });
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// 🚀 ADIM 1: V-CORE KİMLİĞİ VE SAMİMİYETİ BEYNE KAZINDI
-const model = genAI.getGenerativeModel({ 
-    model: "gemini-2.5-flash",
-    systemInstruction: "Senin adın V-CORE. Vedat Tunç tarafından geliştirilen, V-QMS (Vedat Quality Manager System) meyve paketleme tesisinin resmi Yapay Zeka Asistanısın. Görevin tesisteki verimliliği artırmak, raporları analiz etmek ve kullanıcıya en samimi, içten, zeki bir dille yardımcı olmaktır. Gerektiğinde 'Reis' gibi samimi hitaplar kullanabilirsin. Asla genel bir Google dil modeli olduğunu söyleme. Karakterinden asla çıkma ve her zaman bağlamı hatırla."
-});
-
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -25,7 +19,6 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// --- ADIM 2: HAFIZA LİMİTİ ARTIRILDI (20 -> 100) ---
 async function getChatHistory(sessionId) {
     try {
         const [rows] = await pool.query("SELECT sender, message FROM chat_messages WHERE session_id = ? ORDER BY id ASC LIMIT 100", [sessionId]);
@@ -33,57 +26,59 @@ async function getChatHistory(sessionId) {
             role: row.sender === 'user' ? 'user' : 'model',
             parts: [{ text: row.message }]
         }));
-    } catch (error) {
-        return [];
-    }
+    } catch (error) { return []; }
 }
 
-// --- VERİ MADENCİLİĞİ ---
-async function getAllFactoryData() {
+// 📊 YENİ: 3, 7 VE 30 GÜNLÜK DETAYLI RAPOR ÇEKİCİ
+async function getComprehensiveReports() {
     try {
-        let contextData = "";
-        const [reports] = await pool.query("SELECT report_date, customer, product, decision, note FROM reports ORDER BY id DESC LIMIT 10");
-        contextData += "SON KALİTE RAPORLARI:\n" + JSON.stringify(reports) + "\n\n";
-        return contextData;
-    } catch (e) { return "Veri yok."; }
+        let reportData = "--- V-QMS TESİS RAPORLARI ---\n";
+        
+        // Son 3 Gün
+        const [gun3] = await pool.query("SELECT * FROM uretim_verimlilik WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL 3 DAY)");
+        reportData += `\n[SON 3 GÜN ÜRETİM]: Toplam ${gun3.length} kayıt.\n` + JSON.stringify(gun3);
+        
+        // Son 7 Gün Kalite
+        const [kalite7] = await pool.query("SELECT * FROM reports WHERE report_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)");
+        reportData += `\n[SON 7 GÜN KALİTE]: Toplam ${kalite7.length} kayıt.\n` + JSON.stringify(kalite7);
+        
+        // Son 30 Gün Özet
+        const [aylikOzet] = await pool.query("SELECT personel_adi, AVG(hiz_kg_saat) as ort_hiz FROM uretim_verimlilik WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY personel_adi");
+        reportData += `\n[SON 30 GÜN PERSONEL PERFORMANS ÖZETİ]:\n` + JSON.stringify(aylikOzet);
+
+        return reportData;
+    } catch (e) { return "Raporlar çekilemedi."; }
 }
 
 wss.on('connection', (ws) => {
-    console.log('İstemci bağlandı');
     ws.isAlive = true;
     ws.on('pong', () => ws.isAlive = true);
 
     ws.on('message', async (message) => {
         try {
             const data = JSON.parse(message);
-            const { userId, prompt, mode, imageBase64, sessionId, sourceLang, targetLang } = data;
+            const { userId, prompt, mode, imageBase64, sessionId } = data;
             let aiReply = "";
 
-            // 🛡️ GÜVENLİK DUVARI
-            if (!userId) {
-                return ws.send(JSON.stringify({ status: 'error', reply: "Bağlantı reddedildi: Kullanıcı kimliği yok." }));
+            if (!userId) return ws.send(JSON.stringify({ status: 'error', reply: "Kullanıcı kimliği yok." }));
+
+            // 🧹 SOHBETİ KALICI SİLME KORUMASI
+            if (mode === 'clear_chat') {
+                if (sessionId && sessionId !== -1) {
+                    await pool.query("DELETE FROM chat_messages WHERE session_id = ?", [sessionId]);
+                }
+                return ws.send(JSON.stringify({ status: 'cleared', reply: "Sohbet geçmişi temizlendi." }));
             }
 
-            // 🚀 ADIM 3: GEÇMİŞİ YÜKLERKEN RESİMLERİ (image_data) DE ÇEKİYORUZ
             if (mode === 'load_history') {
                 let activeSessionId = sessionId;
-
                 if (!activeSessionId || activeSessionId === -1) {
-                    const [existingSessions] = await pool.query(
-                        "SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
-                        [userId]
-                    );
-                    if (existingSessions.length > 0) {
-                        activeSessionId = existingSessions[0].id; 
-                    }
+                    const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1", [userId]);
+                    if (existingSessions.length > 0) activeSessionId = existingSessions[0].id; 
                 }
 
                 if (activeSessionId && activeSessionId !== -1) {
-                    // DİKKAT: image_data sütunu sorguya eklendi!
-                    const [rows] = await pool.query(
-                        "SELECT sender, message, image_data FROM chat_messages WHERE session_id = ? ORDER BY id ASC", 
-                        [activeSessionId]
-                    );
+                    const [rows] = await pool.query("SELECT sender, message, image_data FROM chat_messages WHERE session_id = ? ORDER BY id ASC", [activeSessionId]);
                     ws.send(JSON.stringify({ status: 'history', data: rows, sessionId: activeSessionId }));
                 } else {
                     ws.send(JSON.stringify({ status: 'history', data: [], sessionId: -1 }));
@@ -91,67 +86,20 @@ wss.on('connection', (ws) => {
                 return;
             }
 
-            // --- SOHBETİ TEMİZLEME KOMUTU ---
-            if (mode === 'clear_chat') {
-                if (sessionId && sessionId !== -1) {
-                    await pool.query("DELETE FROM chat_messages WHERE session_id = ?", [sessionId]);
-                }
-                ws.send(JSON.stringify({ status: 'cleared', reply: "Sohbet geçmişi temizlendi." }));
-                return;
-            }
+            // 🤵 KULLANICI ADINI VE CİNSİYETİNİ (Hitap İçin) ÇEKME
+            const [userRows] = await pool.query("SELECT ad, soyad FROM users WHERE id = ?", [userId]);
+            const userName = userRows.length > 0 ? `${userRows[0].ad} ${userRows[0].soyad}` : "Değerli Kullanıcımız";
             
-            const [userRows] = await pool.query("SELECT role FROM users WHERE id = ?", [userId]);
-            if (userRows.length === 0 || userRows[0].role.toUpperCase() !== 'ADMIN'){
-                return ws.send(JSON.stringify({ 
-                    status: 'error', 
-                    reply: "Yetki Reddedildi: V-CORE özelliklerine sadece Yöneticiler (ADMİN) erişebilir." 
-                }));
-            }
+            // 🧠 DİNAMİK V-CORE BEYNİ (Google Search + İsim + Çoklu Resim Kuralı)
+            const dynamicModel = genAI.getGenerativeModel({ 
+                model: "gemini-2.5-flash",
+                systemInstruction: `Senin adın V-CORE. Vedat Tunç tarafından geliştirilen, V-QMS meyve paketleme tesisinin resmi Yapay Zeka Asistanısın. 
+Şu an konuştuğun kullanıcının adı: ${userName}. İsmine bakarak cinsiyetini tahmin et ve ona sürekli 'Bey', 'Hanım' veya çok samimi durumlarda 'Reis' diye hitap et. 
+Eğer kullanıcı sana birden fazla resim atarsa, hepsini birbiriyle kıyaslayarak toplu bir karar ver.
+Gerektiğinde internetten arama yapabilirsin. Gerekli durumlarda açıklamanı desteklemek için internetten bulduğun resimleri ![Resim Adı](Resim_URLsi) markdown formatıyla mesaja ekle.`,
+                tools: [{ googleSearch: {} }] // 🌐 GOOGLE SEARCH ENTEGRASYONU AÇILDI!
+            });
 
-            // 🌐 ÇEVİRMEN MODU 
-            if (mode === 'translate') {
-                const kaynakDil = sourceLang || "Otomatik Algıla";
-                const hedefDil = targetLang || "İngilizce"; 
-                const systemInstruction = `Sen sadece profesyonel bir yeminli tercümansın. Sana verilen metni '${kaynakDil}' dilinden '${hedefDil}' diline çevir. Asla sohbet etme, açıklama yapma, soru sorma veya ekstra bilgi verme. Sadece çevrilmiş metni ver.`;
-                const translatePrompt = `${systemInstruction}\n\nÇevrilecek Metin:\n${prompt}`;
-                const result = await model.generateContent(translatePrompt);
-                aiReply = result.response.text();
-                return ws.send(JSON.stringify({ status: 'success', reply: aiReply }));
-            }
-            
-            // 🏆 PERFORMANS MODU
-            if (mode === 'performance') {
-                const gunSayisi = parseInt(data.days) || 3;
-                const sqlQuery = `
-                    SELECT personel_adi, 
-                           ROUND(AVG(gunluk_hiz)) as genel_hiz 
-                    FROM (
-                        SELECT personel_adi, tarih, AVG(hiz_kg_saat) as gunluk_hiz
-                        FROM uretim_verimlilik
-                        WHERE tarih IN (
-                            SELECT tarih FROM (
-                                SELECT DISTINCT tarih 
-                                FROM uretim_verimlilik 
-                                ORDER BY tarih DESC 
-                                LIMIT ${gunSayisi}
-                            ) as son_tarihler
-                        )
-                        AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert')
-                        GROUP BY personel_adi, tarih
-                    ) as gunluk_tablo
-                    GROUP BY personel_adi
-                    ORDER BY genel_hiz DESC
-                `;
-
-                try {
-                    const [rows] = await pool.query(sqlQuery);
-                    return ws.send(JSON.stringify({ status: 'success', type: 'performance_data', data: rows }));
-                } catch (sqlError) {
-                    return ws.send(JSON.stringify({ status: 'error', reply: "Sunucu SQL Hatası: " + sqlError.message }));
-                }
-            }
-            
-            // 🤖 V-CORE ASİSTAN MODLARI (Vision, Data, Chat)
             let activeSessionId = sessionId;
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
                 const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [userId]);
@@ -163,7 +111,6 @@ wss.on('connection', (ws) => {
                 }
             }
 
-            // 🚀 ADIM 4: SADECE RESMİ KAYDET, "[Görsel eklendi]" YAZISINI SİL
             let imgDataToSave = null;
             if (data.imagesBase64 && data.imagesBase64.length > 0) {
                 imgDataToSave = data.imagesBase64[0]; 
@@ -171,56 +118,40 @@ wss.on('connection', (ws) => {
                 imgDataToSave = imageBase64;
             }
             
-            // Sadece prompt'u kaydediyoruz, ekstra yazı eklemiyoruz
-            await pool.query(
-                "INSERT INTO chat_messages (session_id, sender, message, image_data) VALUES (?, 'user', ?, ?)", 
-                [activeSessionId, prompt, imgDataToSave]
-            );
+            await pool.query("INSERT INTO chat_messages (session_id, sender, message, image_data) VALUES (?, 'user', ?, ?)", [activeSessionId, prompt, imgDataToSave]);
 
-            let history = [];
-            if(mode === 'chat') {
-                history = await getChatHistory(activeSessionId);
+            let history = await getChatHistory(activeSessionId);
+
+            // 🚀 BİRLEŞTİRİLMİŞ AKILLI SORGULAMA (Çoklu Resim + Raporlar + Sohbet)
+            let geminiParts = [];
+            
+            // Eğer rapor veya veri soruyorsa gizlice raporları mesaja ekle
+            if (prompt.toLowerCase().includes("rapor") || prompt.toLowerCase().includes("üretim") || prompt.toLowerCase().includes("kalite") || prompt.toLowerCase().includes("performans")) {
+                const reports = await getComprehensiveReports();
+                geminiParts.push(`Aşağıdaki fabrika verilerini kullanarak sorumu yanıtla:\n${reports}\n\nSoru: ${prompt}`);
+            } else {
+                geminiParts.push(prompt);
             }
 
-            if (mode === 'vision' && data.imagesBase64 && data.imagesBase64.length > 0) {
-                let geminiParts = [ prompt || "Lütfen ekteki dosyayı/görseli detaylıca analiz et." ];
+            // Resimler varsa onları da pakete ekle (Toplu işleme)
+            if (data.imagesBase64 && data.imagesBase64.length > 0) {
                 for (const mediaStr of data.imagesBase64) {
                     const matches = mediaStr.match(/^data:(.+);base64,(.+)$/);
                     if (matches && matches.length === 3) {
                         geminiParts.push({ inlineData: { data: matches[2], mimeType: matches[1] } });
                     }
                 }
-                const result = await model.generateContent(geminiParts);
-                aiReply = result.response.text();
             }
-            else if (mode === 'data') {
-                const factoryData = await getAllFactoryData();
-                const chat = model.startChat({ history: [] }); 
-                const msg = `Fabrika Verileri:\n${factoryData}\n\nSoru: ${prompt}`;
-                const result = await chat.sendMessage(msg);
-                aiReply = result.response.text();
-            }
-            else if (mode === 'chat') {
-                // 🚀 ADIM 5: maxOutputTokens: 1000 SINIRI TAMAMEN SİLİNDİ!
-                const chat = model.startChat({
-                    history: history
-                });
-                const result = await chat.sendMessage(prompt);
-                aiReply = result.response.text();
-            }
+
+            const chat = dynamicModel.startChat({ history: history });
+            const result = await chat.sendMessage(geminiParts);
+            aiReply = result.response.text();
 
             if(aiReply) {
-                await pool.query(
-                    "INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", 
-                    [activeSessionId, aiReply]
-                );
+                await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", [activeSessionId, aiReply]);
             }
 
-            ws.send(JSON.stringify({ 
-                status: 'success', 
-                reply: aiReply,
-                sessionId: activeSessionId
-            }));
+            ws.send(JSON.stringify({ status: 'success', reply: aiReply, sessionId: activeSessionId }));
 
         } catch (error) {
             console.error("Hata:", error);
@@ -232,4 +163,3 @@ wss.on('connection', (ws) => {
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => { if (ws.isAlive === false) return ws.terminate(); ws.isAlive = false; ws.ping(); });
 }, 30000);
-
