@@ -44,40 +44,61 @@ async function getComprehensiveReports() {
 
         // 2. GELİŞMİŞ PERFORMANS TABLOSU (Senin yazdığın o harika SQL algoritması)
         // AI'ın genel bir fikir edinmesi için son 15 veriyi baz alıyoruz
-        const perfSql = `
-            SELECT * FROM (
-                SELECT personel_adi, ROUND(AVG(hiz_kg_saat)) as genel_hiz 
-                FROM (
-                    SELECT personel_adi, hiz_kg_saat, 
-                           ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY id DESC) as sira
-                    FROM uretim_verimlilik 
-                    WHERE personel_adi != 'YEVMİYECİ' 
-                      AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert')
-                ) as sigortali_sirali 
-                WHERE sira <= 15 
-                GROUP BY personel_adi
-                
-                UNION ALL
-                
-                SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz 
-                FROM (
-                    SELECT personel_adi, gunluk_hiz, 
-                           ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_tarihi DESC) as sira
-                    FROM (
-                        SELECT personel_adi, DATE(tarih) as islem_tarihi, AVG(hiz_kg_saat) as gunluk_hiz 
-                        FROM uretim_verimlilik 
-                        WHERE personel_adi = 'YEVMİYECİ' 
-                        GROUP BY personel_adi, islem_tarihi
-                    ) as yevmiyeci_gunluk
-                ) as yevmiyeci_sirali 
-                WHERE sira <= 15 
-                GROUP BY personel_adi
-            ) AS final_tablo 
-            ORDER BY genel_hiz DESC
-        `;
         
-        const [performans] = await pool.query(perfSql);
-        reportData += `\n[PERSONEL PERFORMANS SIRALAMASI (En iyi verimlilikten en düşüğe)]:\n` + JSON.stringify(performans);
+// --- YARDIMCI FONKSİYON: SQL İLE PERFORMANS HESAPLAMA ---
+async function getPerformanceDataForAI(limit) {
+    const perfSql = `
+        SELECT * FROM (
+            SELECT personel_adi, ROUND(AVG(hiz_kg_saat)) as genel_hiz 
+            FROM (
+                SELECT personel_adi, hiz_kg_saat, 
+                       ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY id DESC) as sira
+                FROM uretim_verimlilik 
+                WHERE personel_adi != 'YEVMİYECİ' 
+                  AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert')
+            ) as sigortali_sirali 
+            WHERE sira <= ${limit} 
+            GROUP BY personel_adi
+            
+            UNION ALL
+            
+            SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz 
+            FROM (
+                SELECT personel_adi, gunluk_hiz, 
+                       ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_tarihi DESC) as sira
+                FROM (
+                    SELECT personel_adi, DATE(tarih) as islem_tarihi, AVG(hiz_kg_saat) as gunluk_hiz 
+                    FROM uretim_verimlilik 
+                    WHERE personel_adi = 'YEVMİYECİ' 
+                    GROUP BY personel_adi, islem_tarihi
+                ) as yevmiyeci_gunluk
+            ) as yevmiyeci_sirali 
+            WHERE sira <= ${limit} 
+            GROUP BY personel_adi
+        ) AS final_tablo 
+        ORDER BY genel_hiz DESC
+    `;
+    const [rows] = await pool.query(perfSql);
+    return rows;
+}
+
+// --- ANA RAPOR ÇEKME FONKSİYONU ---
+async function getComprehensiveReports() {
+    try {
+        let reportData = "--- V-QMS TESİS RAPORLARI VE PERFORMANS VERİLERİ ---\n";
+        
+        // Sadece özet bilgi gönderiyoruz, AI'ın kafası karışmasın
+        const [uretim] = await pool.query("SELECT id, tarih, personel_adi FROM uretim_verimlilik ORDER BY tarih DESC LIMIT 50");
+        reportData += `\n[SON ÜRETİM KAYIT BİLGİSİ]: Toplam ${uretim.length} son işlem.\n`;
+        
+        // İŞTE BURASI: 3, 7 ve 30 Günlük Hazır SQL Tablolarını Yapay Zekaya Veriyoruz!
+        const perf3 = await getPerformanceDataForAI(3);
+        const perf7 = await getPerformanceDataForAI(7);
+        const perf30 = await getPerformanceDataForAI(30);
+
+        reportData += `\n[3 GÜNLÜK PERFORMANS TABLOSU (Hazır Hesaplanmış, Kesin Veri)]:\n` + JSON.stringify(perf3);
+        reportData += `\n[7 GÜNLÜK PERFORMANS TABLOSU (Hazır Hesaplanmış, Kesin Veri)]:\n` + JSON.stringify(perf7);
+        reportData += `\n[30 GÜNLÜK PERFORMANS TABLOSU (Hazır Hesaplanmış, Kesin Veri)]:\n` + JSON.stringify(perf30);
         
         return reportData;
     } catch (e) { 
@@ -85,8 +106,7 @@ async function getComprehensiveReports() {
         return "Raporlar çekilemedi."; 
     }
 }
-
-
+        
 wss.on('connection', (ws) => {
     ws.isAlive = true;
     ws.on('pong', () => ws.isAlive = true);
