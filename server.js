@@ -33,16 +33,59 @@ async function getChatHistory(sessionId) {
 
 async function getComprehensiveReports() {
     try {
-        let reportData = "--- V-QMS TESİS RAPORLARI ---\n";
-        const [gun3] = await pool.query("SELECT * FROM uretim_verimlilik WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL 3 DAY)");
-        reportData += `\n[SON 3 GÜN ÜRETİM]: Toplam ${gun3.length} kayıt.\n` + JSON.stringify(gun3);
-        const [kalite7] = await pool.query("SELECT * FROM reports WHERE report_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)");
-        reportData += `\n[SON 7 GÜN KALİTE]: Toplam ${kalite7.length} kayıt.\n` + JSON.stringify(kalite7);
-        const [aylikOzet] = await pool.query("SELECT personel_adi, AVG(hiz_kg_saat) as ort_hiz FROM uretim_verimlilik WHERE tarih >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY personel_adi");
-        reportData += `\n[SON 30 GÜN PERSONEL PERFORMANS ÖZETİ]:\n` + JSON.stringify(aylikOzet);
+        let reportData = "--- V-QMS TESİS RAPORLARI VE PERFORMANS VERİLERİ ---\n";
+        
+        // 1. ÜRETİM VE KALİTE ÖZETLERİ (Son 150 kayıt)
+        const [uretim] = await pool.query("SELECT * FROM uretim_verimlilik ORDER BY tarih DESC LIMIT 150");
+        reportData += `\n[SON ÜRETİM KAYITLARI]: Toplam ${uretim.length} kayıt.\n` + JSON.stringify(uretim);
+        
+        const [kalite] = await pool.query("SELECT * FROM reports ORDER BY report_date DESC LIMIT 150");
+        reportData += `\n[SON KALİTE KAYITLARI]: Toplam ${kalite.length} kayıt.\n` + JSON.stringify(kalite);
+
+        // 2. GELİŞMİŞ PERFORMANS TABLOSU (Senin yazdığın o harika SQL algoritması)
+        // AI'ın genel bir fikir edinmesi için son 15 veriyi baz alıyoruz
+        const perfSql = `
+            SELECT * FROM (
+                SELECT personel_adi, ROUND(AVG(hiz_kg_saat)) as genel_hiz 
+                FROM (
+                    SELECT personel_adi, hiz_kg_saat, 
+                           ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY id DESC) as sira
+                    FROM uretim_verimlilik 
+                    WHERE personel_adi != 'YEVMİYECİ' 
+                      AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert')
+                ) as sigortali_sirali 
+                WHERE sira <= 15 
+                GROUP BY personel_adi
+                
+                UNION ALL
+                
+                SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz 
+                FROM (
+                    SELECT personel_adi, gunluk_hiz, 
+                           ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_tarihi DESC) as sira
+                    FROM (
+                        SELECT personel_adi, DATE(tarih) as islem_tarihi, AVG(hiz_kg_saat) as gunluk_hiz 
+                        FROM uretim_verimlilik 
+                        WHERE personel_adi = 'YEVMİYECİ' 
+                        GROUP BY personel_adi, islem_tarihi
+                    ) as yevmiyeci_gunluk
+                ) as yevmiyeci_sirali 
+                WHERE sira <= 15 
+                GROUP BY personel_adi
+            ) AS final_tablo 
+            ORDER BY genel_hiz DESC
+        `;
+        
+        const [performans] = await pool.query(perfSql);
+        reportData += `\n[PERSONEL PERFORMANS SIRALAMASI (En iyi verimlilikten en düşüğe)]:\n` + JSON.stringify(performans);
+        
         return reportData;
-    } catch (e) { return "Raporlar çekilemedi."; }
+    } catch (e) { 
+        console.error("Rapor Çekme Hatası:", e);
+        return "Raporlar çekilemedi."; 
+    }
 }
+
 
 wss.on('connection', (ws) => {
     ws.isAlive = true;
@@ -173,7 +216,10 @@ wss.on('connection', (ws) => {
 
             // YENİ KÜTÜPHANE İÇİN PAKET HAZIRLIĞI
             let currentMessageParts = [];
-            if (prompt.toLowerCase().includes("rapor") || prompt.toLowerCase().includes("üretim") || prompt.toLowerCase().includes("kalite")) {
+            const lowerPrompt = prompt.toLowerCase();
+if (lowerPrompt.includes("rapor") || lowerPrompt.includes("üretim") || 
+    lowerPrompt.includes("kalite") || lowerPrompt.includes("performans") || 
+    lowerPrompt.includes("verimlilik")) {
                 const reports = await getComprehensiveReports();
                 currentMessageParts.push({ text: `Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}` });
             } else {
