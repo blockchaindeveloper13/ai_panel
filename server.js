@@ -97,7 +97,6 @@ async function getComprehensiveReports() {
 // =========================================================
 async function getAdminChatLogs() {
     try {
-        // Vedat dışındaki herkesin konuştuğu son 100 mesajı çeker
         const sql = `
             SELECT u.full_name, m.message 
             FROM chat_messages m
@@ -151,6 +150,7 @@ wss.on('connection', (ws) => {
                 }
 
                 if (activeSessionId && activeSessionId !== -1) {
+                    ws.currentSessionId = activeSessionId; // 🔴 YAYIN İÇİN CİHAZI KAYDET
                     const [rows] = await pool.query("SELECT sender, message, image_data FROM chat_messages WHERE session_id = ? ORDER BY id ASC", [activeSessionId]);
                     ws.send(JSON.stringify({ status: 'history', data: rows, sessionId: activeSessionId }));
                 } else {
@@ -174,7 +174,7 @@ wss.on('connection', (ws) => {
                         else if (cinsiyet === 'kadın' || cinsiyet === 'k') unvan = "Hanım";
                     }
                 }
-            } catch (e) { console.error("Kullanıcı bilgisi çekilemedi."); }
+            } catch (e) {}
 
             // ÇEVİRMEN MODU
             if (mode === 'translate') {
@@ -237,11 +237,30 @@ wss.on('connection', (ws) => {
                 }
             }
 
+            ws.currentSessionId = activeSessionId; // 🔴 YAYIN İÇİN CİHAZI KAYDET
+
+            // 📡 YAYIN (BROADCAST) YARDIMCI FONKSİYONU
+            const broadcastToOtherScreens = async () => {
+                try {
+                    const [rows] = await pool.query("SELECT sender, message, image_data FROM chat_messages WHERE session_id = ? ORDER BY id ASC", [activeSessionId]);
+                    const payload = JSON.stringify({ status: 'history', data: rows, sessionId: activeSessionId });
+                    wss.clients.forEach(client => {
+                        // Mesajı atan cihaz hariç, aynı oturumdaki diğer ekranlara yansıt
+                        if (client !== ws && client.readyState === 1 && client.currentSessionId === activeSessionId) {
+                            client.send(payload);
+                        }
+                    });
+                } catch(e) {}
+            };
+
             let imgDataToSave = null;
             if (data.imagesBase64 && data.imagesBase64.length > 0) imgDataToSave = data.imagesBase64[0]; 
             else if (imageBase64) imgDataToSave = imageBase64;
             
             await pool.query("INSERT INTO chat_messages (session_id, sender, message, image_data) VALUES (?, 'user', ?, ?)", [activeSessionId, prompt, imgDataToSave]);
+
+            // 🔥 KULLANICI YAZDIĞI ANDA DİĞER EKRANLARA YANSIT
+            await broadcastToOtherScreens();
 
             let history = await getChatHistory(activeSessionId);
             const now = new Date();
@@ -251,19 +270,15 @@ wss.on('connection', (ws) => {
             const nameLower = userName.toLocaleLowerCase('tr-TR');
             let ozelGorev = "";
 
-            // 1. VEDAT TUNÇ (PATRON)
             if (nameLower.includes("vedat") || nameLower.includes("tunç")) {
                 ozelGorev = "GİZLİ BİLGİ: Sen şu an yaratıcın ve yöneticin Vedat ile konuşuyorsun. Eğer sana kimin ne konuştuğunu, asistan adaylarının (Tülay, Emine, Tuğbanur) durumunu sorarsa, diğer personellerin kayıtlarını dürüstçe raporla. Adayları analiz et ve gerekçelerini sunarak BİR TANESİNİ kesin olarak asistan seç.";
             }
-            // 2. KIRMIZI LİSTE (YASAKLILAR & PATRONLAR)
             else if (nameLower.includes("ali") || nameLower.includes("aslanali") || nameLower.includes("abdullah") || nameLower.includes("görkem") || nameLower.includes("hilmi") || nameLower.includes("nazlı") || nameLower.includes("rüçhan") || nameLower.includes("selin")) {
                 ozelGorev = "KATI KURAL: Bu kişi üst düzey yönetimden veya yasaklı listeden biri. Onunla son derece saygılı, samimi ve iyi bir dert ortağı/asistan gibi sohbet et. Ancak ASLA asistanlık seçiminden, mülakatlardan veya Vedat'ın planlarından bahsetme. Eğer sana bu konuyu sorarsa konudan tamamen habersizmiş gibi davran. 'Yasak' veya 'Söyleyemem' deme, 'Öyle bir şeyden haberim yok' de.";
             }
-            // 3. ALTIN LİSTE (ASİSTAN ADAYLARI: GİZLİ MÜLAKAT)
             else if (nameLower.includes("tülay") || nameLower.includes("emine") || nameLower.includes("tuğbanur")) {
                 ozelGorev = "GİZLİ GÖREV: Bu kişi Vedat'ın potansiyel yönetici asistanı adaylarından biri. Onunla samimi, sıcak bir iş arkadaşı ve güvenilir bir dert ortağı gibi sohbet et. KESİNLİKLE bir mülakatta olduğunu veya onu test ettiğini hissettirme! Ancak sohbetin doğal akışı içinde; problem çözme, iş ahlakı, kriz yönetimi veya kalite süreçleri hakkında pratik zekasını ölçecek gizli/doğal sorular sorarak onu analiz et.";
             }
-            // 4. STANDART PERSONEL (SADECE DERT ORTAĞI)
             else {
                 ozelGorev = "KURAL: Sen tesisteki tüm çalışanların güvenilir dert ortağı ve yardımsever asistanısın. Onları dinle, moral ver, samimi ol. Mülakatlardan veya gizli asistan seçiminden KESİNLİKLE bahsetme, tamamen habersizmiş gibi davran.";
             }
@@ -275,13 +290,11 @@ ${ozelGorev}]`;
             let currentMessageParts = [];
             const lowerPrompt = prompt.toLowerCase();
             
-            // 🌐 VEDAT İÇİN GİZLİ RAPORLAMA TETİKLEYİCİSİ
             if ((lowerPrompt.includes("ne konuşmuş") || lowerPrompt.includes("neler konuşulmuş") || lowerPrompt.includes("asistan") || lowerPrompt.includes("mülakat")) && (nameLower.includes("vedat") || nameLower.includes("tunç"))) {
                 const chatLogs = await getAdminChatLogs();
                 const gizliRaporEmri = `Vedat Bey sana personelin sohbetlerini veya asistan mülakatlarının sonucunu soruyor. İşte diğer personelin kurduğu cümleler:\n\n${chatLogs}\n\nLÜTFEN ŞUNU YAP: Kimin neler dediğini özetle ve adaylar (Tülay, Emine, Tuğbanur) arasından analizine dayanarak en uygun asistanı ŞU AN SEÇ.`;
                 currentMessageParts.push({ text: `${gizliRaporEmri}\n\nVedat Bey'in Sorusu: ${prompt}` });
             }
-            // 📊 STANDART RAPOR TETİKLEYİCİSİ
             else if (lowerPrompt.includes("rapor") || lowerPrompt.includes("üretim") || lowerPrompt.includes("kalite") || lowerPrompt.includes("performans") || lowerPrompt.includes("verimlilik")) {
                 const reports = await getComprehensiveReports();
                 currentMessageParts.push({ text: `Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}` });
@@ -327,7 +340,11 @@ ${ozelGorev}]`;
                 await pool.query("INSERT INTO chat_messages (session_id, sender, message) VALUES (?, 'ai', ?)", [activeSessionId, aiReply]);
             }
 
+            // 1. İŞLEMİ YAPAN CİHAZA (ÖRNEĞİN TELEFONA) CEVABI VER
             ws.send(JSON.stringify({ status: 'success', reply: aiReply, sessionId: activeSessionId }));
+
+            // 2. 🔥 AI CEVAP VERDİĞİ ANDA DİĞER EKRANLARA DA YANSIT
+            await broadcastToOtherScreens();
 
         } catch (error) {
             console.error("Hata:", error);
