@@ -103,12 +103,13 @@ wss.on('connection', (ws) => {
             // PERFORMANS MODU (Değişmedi, veritabanı işlemi)
                         // PERFORMANS MODU (Takvim Günü Değil, Son "N" Kayıt/Rapor Bazlı Hesaplama)
                         // PERFORMANS MODU (Kesin Çözüm: ID'ye Göre Sıralama ve Gizlenen İsimler)
+                        // PERFORMANS MODU (Sigortalılar ID'ye göre, Yevmiyeciler TAKVİME göre hesaplanıyor)
             if (mode === 'performance') {
                 const kayitSayisi = parseInt(data.days) || 3; 
                 
                 const sqlQuery = `
                     SELECT * FROM (
-                        -- 1. SİGORTALILAR İÇİN: Sisteme eklenen en son N kaydı (ID'ye göre) bul
+                        -- 1. SİGORTALILAR İÇİN (Dokunulmadı: En son eklenen N kaydı ID'ye göre bul)
                         SELECT personel_adi, ROUND(AVG(hiz_kg_saat)) as genel_hiz 
                         FROM (
                             SELECT personel_adi, hiz_kg_saat, 
@@ -122,13 +123,13 @@ wss.on('connection', (ws) => {
                         
                         UNION ALL
                         
-                        -- 2. YEVMİYECİLER İÇİN: Önce günlük hızı bul, sonra son N işlemi (ID'ye göre) al
+                        -- 2. YEVMİYECİLER İÇİN (Düzeltildi: Takvim tarihine göre son N GÜNÜ bul)
                         SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz 
                         FROM (
                             SELECT personel_adi, gunluk_hiz, 
-                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_id DESC) as sira
+                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_tarihi DESC) as sira
                             FROM (
-                                SELECT personel_adi, DATE(tarih) as islem_tarihi, MAX(id) as islem_id, AVG(hiz_kg_saat) as gunluk_hiz 
+                                SELECT personel_adi, DATE(tarih) as islem_tarihi, AVG(hiz_kg_saat) as gunluk_hiz 
                                 FROM uretim_verimlilik 
                                 WHERE personel_adi = 'YEVMİYECİ' 
                                 GROUP BY personel_adi, islem_tarihi
@@ -143,6 +144,7 @@ wss.on('connection', (ws) => {
                 const [rows] = await pool.query(sqlQuery);
                 return ws.send(JSON.stringify({ status: 'success', type: 'performance_data', data: rows }));
             }
+            
             //burada biter...
             
 
