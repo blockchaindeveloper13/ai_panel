@@ -31,21 +31,9 @@ async function getChatHistory(sessionId) {
     } catch (error) { return []; }
 }
 
-async function getComprehensiveReports() {
-    try {
-        let reportData = "--- V-QMS TESİS RAPORLARI VE PERFORMANS VERİLERİ ---\n";
-        
-        // 1. ÜRETİM VE KALİTE ÖZETLERİ (Son 150 kayıt)
-        const [uretim] = await pool.query("SELECT * FROM uretim_verimlilik ORDER BY tarih DESC LIMIT 150");
-        reportData += `\n[SON ÜRETİM KAYITLARI]: Toplam ${uretim.length} kayıt.\n` + JSON.stringify(uretim);
-        
-        const [kalite] = await pool.query("SELECT * FROM reports ORDER BY report_date DESC LIMIT 150");
-        reportData += `\n[SON KALİTE KAYITLARI]: Toplam ${kalite.length} kayıt.\n` + JSON.stringify(kalite);
-
-        // 2. GELİŞMİŞ PERFORMANS TABLOSU (Senin yazdığın o harika SQL algoritması)
-        // AI'ın genel bir fikir edinmesi için son 15 veriyi baz alıyoruz
-        
+// =========================================================
 // --- YARDIMCI FONKSİYON: SQL İLE PERFORMANS HESAPLAMA ---
+// =========================================================
 async function getPerformanceDataForAI(limit) {
     const perfSql = `
         SELECT * FROM (
@@ -82,7 +70,9 @@ async function getPerformanceDataForAI(limit) {
     return rows;
 }
 
+// =========================================================
 // --- ANA RAPOR ÇEKME FONKSİYONU ---
+// =========================================================
 async function getComprehensiveReports() {
     try {
         let reportData = "--- V-QMS TESİS RAPORLARI VE PERFORMANS VERİLERİ ---\n";
@@ -106,7 +96,10 @@ async function getComprehensiveReports() {
         return "Raporlar çekilemedi."; 
     }
 }
-        
+
+// =========================================================
+// --- WEBSOCKET BAĞLANTISI VE AI İŞLEMLERİ ---
+// =========================================================
 wss.on('connection', (ws) => {
     ws.isAlive = true;
     ws.on('pong', () => ws.isAlive = true);
@@ -149,13 +142,13 @@ wss.on('connection', (ws) => {
                 if (userRows.length > 0 && userRows[0].full_name) userName = userRows[0].full_name; 
             } catch (e) {}
 
-            // ÇEVİRMEN MODU (YENİ SİSTEME UYARLANDI)
+            // ÇEVİRMEN MODU (Yeni SDK Kurallarına Göre Düzeltildi)
             if (mode === 'translate') {
                 const kaynak = sourceLang || "Otomatik";
                 const hedef = targetLang || "İngilizce"; 
                 const response = await ai.models.generateContent({
                     model: 'gemini-3.1-flash-lite-preview',
-                    contents: `Çevrilecek Metin:\n${prompt}`,
+                    contents: [{ role: 'user', parts: [{ text: `Çevrilecek Metin:\n${prompt}` }] }],
                     config: {
                         systemInstruction: `Sen yeminli tercümansın. '${kaynak}' dilinden '${hedef}' diline çevir. Sadece çeviriyi ver.`
                     }
@@ -163,16 +156,12 @@ wss.on('connection', (ws) => {
                 return ws.send(JSON.stringify({ status: 'success', reply: response.text }));
             }
 
-            // PERFORMANS MODU (Değişmedi, veritabanı işlemi)
-                        // PERFORMANS MODU (Takvim Günü Değil, Son "N" Kayıt/Rapor Bazlı Hesaplama)
-                        // PERFORMANS MODU (Kesin Çözüm: ID'ye Göre Sıralama ve Gizlenen İsimler)
-                        // PERFORMANS MODU (Sigortalılar ID'ye göre, Yevmiyeciler TAKVİME göre hesaplanıyor)
+            // PERFORMANS MODU (Dokunulmadı, Orijinal Korumada)
             if (mode === 'performance') {
                 const kayitSayisi = parseInt(data.days) || 3; 
                 
                 const sqlQuery = `
                     SELECT * FROM (
-                        -- 1. SİGORTALILAR İÇİN (Dokunulmadı: En son eklenen N kaydı ID'ye göre bul)
                         SELECT personel_adi, ROUND(AVG(hiz_kg_saat)) as genel_hiz 
                         FROM (
                             SELECT personel_adi, hiz_kg_saat, 
@@ -186,7 +175,6 @@ wss.on('connection', (ws) => {
                         
                         UNION ALL
                         
-                        -- 2. YEVMİYECİLER İÇİN (Düzeltildi: Takvim tarihine göre son N GÜNÜ bul)
                         SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz 
                         FROM (
                             SELECT personel_adi, gunluk_hiz, 
@@ -208,9 +196,6 @@ wss.on('connection', (ws) => {
                 return ws.send(JSON.stringify({ status: 'success', type: 'performance_data', data: rows }));
             }
             
-            //burada biter...
-            
-
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
                 const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [userId]);
                 if (existingSessions.length > 0) activeSessionId = existingSessions[0].id; 
@@ -237,9 +222,10 @@ wss.on('connection', (ws) => {
             // YENİ KÜTÜPHANE İÇİN PAKET HAZIRLIĞI
             let currentMessageParts = [];
             const lowerPrompt = prompt.toLowerCase();
-if (lowerPrompt.includes("rapor") || lowerPrompt.includes("üretim") || 
-    lowerPrompt.includes("kalite") || lowerPrompt.includes("performans") || 
-    lowerPrompt.includes("verimlilik")) {
+            
+            if (lowerPrompt.includes("rapor") || lowerPrompt.includes("üretim") || 
+                lowerPrompt.includes("kalite") || lowerPrompt.includes("performans") || 
+                lowerPrompt.includes("verimlilik")) {
                 const reports = await getComprehensiveReports();
                 currentMessageParts.push({ text: `Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}` });
             } else {
@@ -302,4 +288,4 @@ if (lowerPrompt.includes("rapor") || lowerPrompt.includes("üretim") ||
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => { if (ws.isAlive === false) return ws.terminate(); ws.isAlive = false; ws.ping(); });
 }, 30000);
-                            
+                
