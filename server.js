@@ -102,32 +102,33 @@ wss.on('connection', (ws) => {
 
             // PERFORMANS MODU (Değişmedi, veritabanı işlemi)
                         // PERFORMANS MODU (Takvim Günü Değil, Son "N" Kayıt/Rapor Bazlı Hesaplama)
+                        // PERFORMANS MODU (Kesin Çözüm: ID'ye Göre Sıralama ve Gizlenen İsimler)
             if (mode === 'performance') {
-                const kayitSayisi = parseInt(data.days) || 3; // Butondan gelen 3, 7, 30 artık "gün" değil, "kayıt sayısı"
+                const kayitSayisi = parseInt(data.days) || 3; 
                 
-                // ROW_NUMBER() ile kişiye özel son X kaydı buluyoruz
                 const sqlQuery = `
                     SELECT * FROM (
-                        -- 1. SİGORTALILAR İÇİN: Her personelin en son N adet kaydını bul ve ortalamasını al
+                        -- 1. SİGORTALILAR İÇİN: Sisteme eklenen en son N kaydı (ID'ye göre) bul
                         SELECT personel_adi, ROUND(AVG(hiz_kg_saat)) as genel_hiz 
                         FROM (
                             SELECT personel_adi, hiz_kg_saat, 
-                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY tarih DESC) as sira
+                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY id DESC) as sira
                             FROM uretim_verimlilik 
-                            WHERE personel_adi != 'YEVMİYECİ'
+                            WHERE personel_adi != 'YEVMİYECİ' 
+                              AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert')
                         ) as sigortali_sirali 
                         WHERE sira <= ${kayitSayisi} 
                         GROUP BY personel_adi
                         
                         UNION ALL
                         
-                        -- 2. YEVMİYECİLER İÇİN: Önce günlük ortalama bul, sonra son N GÜNÜ bul ve ortalamasını al
+                        -- 2. YEVMİYECİLER İÇİN: Önce günlük hızı bul, sonra son N işlemi (ID'ye göre) al
                         SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz 
                         FROM (
                             SELECT personel_adi, gunluk_hiz, 
-                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_tarihi DESC) as sira
+                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_id DESC) as sira
                             FROM (
-                                SELECT personel_adi, DATE(tarih) as islem_tarihi, AVG(hiz_kg_saat) as gunluk_hiz 
+                                SELECT personel_adi, DATE(tarih) as islem_tarihi, MAX(id) as islem_id, AVG(hiz_kg_saat) as gunluk_hiz 
                                 FROM uretim_verimlilik 
                                 WHERE personel_adi = 'YEVMİYECİ' 
                                 GROUP BY personel_adi, islem_tarihi
@@ -142,6 +143,7 @@ wss.on('connection', (ws) => {
                 const [rows] = await pool.query(sqlQuery);
                 return ws.send(JSON.stringify({ status: 'success', type: 'performance_data', data: rows }));
             }
+            //burada biter...
             
 
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
