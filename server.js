@@ -101,12 +101,48 @@ wss.on('connection', (ws) => {
             }
 
             // PERFORMANS MODU (Değişmedi, veritabanı işlemi)
+                        // PERFORMANS MODU (Takvim Günü Değil, Son "N" Kayıt/Rapor Bazlı Hesaplama)
             if (mode === 'performance') {
-                const gunSayisi = parseInt(data.days) || 3;
-                const sqlQuery = `SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz FROM (SELECT personel_adi, tarih, AVG(hiz_kg_saat) as gunluk_hiz FROM uretim_verimlilik WHERE tarih IN (SELECT tarih FROM (SELECT DISTINCT tarih FROM uretim_verimlilik ORDER BY tarih DESC LIMIT ${gunSayisi}) as son_tarihler) AND personel_adi NOT IN ('Sevgi Sert', 'Dilara sert', 'Dilara Sert') GROUP BY personel_adi, tarih) as gunluk_tablo GROUP BY personel_adi ORDER BY genel_hiz DESC`;
+                const kayitSayisi = parseInt(data.days) || 3; // Butondan gelen 3, 7, 30 artık "gün" değil, "kayıt sayısı"
+                
+                // ROW_NUMBER() ile kişiye özel son X kaydı buluyoruz
+                const sqlQuery = `
+                    SELECT * FROM (
+                        -- 1. SİGORTALILAR İÇİN: Her personelin en son N adet kaydını bul ve ortalamasını al
+                        SELECT personel_adi, ROUND(AVG(hiz_kg_saat)) as genel_hiz 
+                        FROM (
+                            SELECT personel_adi, hiz_kg_saat, 
+                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY tarih DESC) as sira
+                            FROM uretim_verimlilik 
+                            WHERE personel_adi != 'YEVMİYECİ'
+                        ) as sigortali_sirali 
+                        WHERE sira <= ${kayitSayisi} 
+                        GROUP BY personel_adi
+                        
+                        UNION ALL
+                        
+                        -- 2. YEVMİYECİLER İÇİN: Önce günlük ortalama bul, sonra son N GÜNÜ bul ve ortalamasını al
+                        SELECT personel_adi, ROUND(AVG(gunluk_hiz)) as genel_hiz 
+                        FROM (
+                            SELECT personel_adi, gunluk_hiz, 
+                                   ROW_NUMBER() OVER(PARTITION BY personel_adi ORDER BY islem_tarihi DESC) as sira
+                            FROM (
+                                SELECT personel_adi, DATE(tarih) as islem_tarihi, AVG(hiz_kg_saat) as gunluk_hiz 
+                                FROM uretim_verimlilik 
+                                WHERE personel_adi = 'YEVMİYECİ' 
+                                GROUP BY personel_adi, islem_tarihi
+                            ) as yevmiyeci_gunluk
+                        ) as yevmiyeci_sirali 
+                        WHERE sira <= ${kayitSayisi} 
+                        GROUP BY personel_adi
+                    ) AS final_tablo 
+                    ORDER BY genel_hiz DESC
+                `;
+                
                 const [rows] = await pool.query(sqlQuery);
                 return ws.send(JSON.stringify({ status: 'success', type: 'performance_data', data: rows }));
             }
+            
 
             if (!activeSessionId || activeSessionId === -1 || activeSessionId === userId) {
                 const [existingSessions] = await pool.query("SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1", [userId]);
