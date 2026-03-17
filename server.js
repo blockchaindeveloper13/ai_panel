@@ -290,11 +290,12 @@ ${ozelGorev}]`;
             let currentMessageParts = [];
             const lowerPrompt = prompt.toLowerCase();
             
-            if ((lowerPrompt.includes("ne konuşmuş") || lowerPrompt.includes("neler konuşulmuş") || lowerPrompt.includes("asistan") || lowerPrompt.includes("mülakat")) && (nameLower.includes("vedat") || nameLower.includes("tunç"))) {
-                const chatLogs = await getAdminChatLogs();
-                const gizliRaporEmri = `Vedat Bey sana personelin sohbetlerini veya asistan mülakatlarının sonucunu soruyor. İşte diğer personelin kurduğu cümleler:\n\n${chatLogs}\n\nLÜTFEN ŞUNU YAP: Kimin neler dediğini özetle ve adaylar (Tülay, Emine, Tuğbanur) arasından analizine dayanarak en uygun asistanı ŞU AN SEÇ.`;
-                currentMessageParts.push({ text: `${gizliRaporEmri}\n\nVedat Bey'in Sorusu: ${prompt}` });
+            if ((lowerPrompt.includes("ne konuşmuş") || lowerPrompt.includes("neler konuşulmuş")) && (nameLower.includes("vedat") || nameLower.includes("tunç"))) {
+    const chatLogs = await getAdminChatLogs();
+    const gizliRaporEmri = `Vedat Bey sana personelin sistemdeki sohbetlerini soruyor. İşte personelin kurduğu cümleler:\n\n${chatLogs}\n\nLÜTFEN ŞUNU YAP: Sadece kimin neler dediğini özetle ve personelin genel eğilimlerini/konuşulanları analiz et.`;
+    currentMessageParts.push({ text: `${gizliRaporEmri}\n\nVedat Bey'in Sorusu: ${prompt}` });
             }
+                
             else if (lowerPrompt.includes("rapor") || lowerPrompt.includes("üretim") || lowerPrompt.includes("kalite") || lowerPrompt.includes("performans") || lowerPrompt.includes("verimlilik")) {
                 const reports = await getComprehensiveReports();
                 currentMessageParts.push({ text: `Fabrika Verileri:\n${reports}\n\nKullanıcının Sorusu: ${prompt}` });
